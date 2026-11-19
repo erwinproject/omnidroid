@@ -405,6 +405,30 @@ function sendProxiedHttpGet(relayHost: string, relayPort: number, targetUrl: str
   });
 }
 
+function sendHalfClosedHttpGet(relayHost: string, relayPort: number, targetUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const u = new URL(targetUrl);
+    const sock = net.createConnection({ host: relayHost, port: relayPort }, () => {
+      sock.write(`GET ${targetUrl} HTTP/1.0\r\nHost: ${u.host}\r\nConnection: close\r\n\r\n`);
+      sock.end();
+    });
+    const chunks: Buffer[] = [];
+    const timer = setTimeout(() => {
+      sock.destroy();
+      reject(new Error('Half-closed GET timed out'));
+    }, 5000);
+    sock.on('data', (c: Buffer) => chunks.push(c));
+    sock.once('end', () => {
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    });
+    sock.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
 describe('Play Store Boot Flags & Proxy Subsystem', () => {
   it('sets ro.setupwizard.mode=DISABLED in buildRedroidBootArgs for GApps/Play Store containers', () => {
     const profile = BUILTIN_DEVICE_PROFILES[0];
@@ -473,13 +497,22 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
     });
   });
 
-  it('tunnels traffic through HTTP CONNECT upstream with Basic auth and rejects bad credentials', async () => {
+  it('tunnels traffic through HTTP CONNECT/forward upstream with Basic auth and rejects bad credentials', async () => {
     const sockets = new Set<net.Socket>();
     const echoServer = net.createServer((sock) => {
       sockets.add(sock);
       sock.on('close', () => sockets.delete(sock));
       sock.on('error', () => {});
       sock.on('data', (d) => sock.write(Buffer.concat([Buffer.from('ECHO:'), d])));
+    });
+    const httpTarget = http.createServer((req, res) => {
+      if (req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pong: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
     });
 
     let seenAuth = false;
@@ -499,7 +532,9 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
         const headerText = buf.subarray(0, end).toString('utf8');
         const rest = buf.subarray(end + 4);
         const lines = headerText.split(/\r?\n/);
-        const target = (lines[0] ?? '').split(' ')[1] ?? '';
+        const firstParts = (lines[0] ?? '').split(' ');
+        const method = (firstParts[0] ?? '').toUpperCase();
+        const target = firstParts[1] ?? '';
         const authLine = lines.find((l) => l.toLowerCase().startsWith('proxy-authorization:'));
         const authVal = authLine ? authLine.split(':').slice(1).join(':').trim() : '';
         if (authVal !== expectedAuth) {
@@ -508,16 +543,42 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
           return;
         }
         seenAuth = true;
-        const [tHost, tPortRaw] = target.split(':');
-        const upstream = net.createConnection({ host: tHost, port: Number(tPortRaw) }, () => {
-          sockets.add(upstream);
-          upstream.on('close', () => sockets.delete(upstream));
-          upstream.on('error', () => client.destroy());
-          client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-          if (rest.length > 0) upstream.write(rest);
-          client.pipe(upstream);
-          upstream.pipe(client);
-        });
+        if (method === 'CONNECT') {
+          const [tHost, tPortRaw] = target.split(':');
+          const upstream = net.createConnection({ host: tHost, port: Number(tPortRaw) }, () => {
+            sockets.add(upstream);
+            upstream.on('close', () => sockets.delete(upstream));
+            upstream.on('error', () => client.destroy());
+            client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+            if (rest.length > 0) upstream.write(rest);
+            client.pipe(upstream);
+            upstream.pipe(client);
+          });
+        } else {
+          const u = new URL(target);
+          const upReq = http.request(
+            {
+              host: u.hostname,
+              port: Number(u.port || 80),
+              path: `${u.pathname}${u.search}`,
+              method,
+              headers: { Host: u.host, Connection: 'close' },
+            },
+            (upRes) => {
+              const chunks: Buffer[] = [];
+              upRes.on('data', (c: Buffer) => chunks.push(c));
+              upRes.on('end', () => {
+                const body = Buffer.concat(chunks);
+                client.write(
+                  `HTTP/1.1 ${upRes.statusCode ?? 200} OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`,
+                );
+                client.end(body);
+              });
+            },
+          );
+          upReq.on('error', () => client.destroy());
+          upReq.end();
+        }
       });
     });
 
@@ -531,6 +592,7 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
 
     try {
       const echoPort = await listenServer(echoServer);
+      const httpPort = await listenServer(httpTarget);
       const proxyPort = await listenServer(httpProxy);
 
       const endpoint = await relay.ensureRelay('test-http-ok', {
@@ -548,6 +610,11 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
       expect(seenAuth).toBe(true);
       expect(relay.getRelayInfo('test-http-ok').stats.totalRequests).toBeGreaterThanOrEqual(1);
 
+      // Mimic toybox nc immediate TCP half-close after GET HTTP/1.0
+      const halfClosed = await sendHalfClosedHttpGet(endpoint.host, endpoint.port, `http://127.0.0.1:${httpPort}/ping`);
+      expect(halfClosed).toContain('200');
+      expect(halfClosed).toContain('{"pong":true}');
+
       const badEndpoint = await relay.ensureRelay('test-http-bad', {
         protocol: 'http',
         host: '127.0.0.1',
@@ -563,6 +630,7 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
       for (const s of sockets) s.destroy();
       await Promise.all([
         new Promise<void>((r) => echoServer.close(() => r())),
+        new Promise<void>((r) => httpTarget.close(() => r())),
         new Promise<void>((r) => httpProxy.close(() => r())),
       ]);
     }
@@ -699,7 +767,12 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
       const httpRes = await sendProxiedHttpGet(endpoint.host, endpoint.port, `http://127.0.0.1:${httpPort}/ping`);
       expect(httpRes.statusCode).toBe(200);
       expect(JSON.parse(httpRes.body)).toEqual({ pong: true });
-      expect(socksAuthed).toBe(2);
+
+      // Mimic toybox nc immediate TCP half-close (FIN right after GET HTTP/1.0 headers)
+      const halfClosed = await sendHalfClosedHttpGet(endpoint.host, endpoint.port, `http://127.0.0.1:${httpPort}/ping`);
+      expect(halfClosed).toContain('200');
+      expect(halfClosed).toContain('{"pong":true}');
+      expect(socksAuthed).toBe(3);
     } finally {
       await relay.stopAll();
       for (const s of sockets) s.destroy();

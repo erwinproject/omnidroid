@@ -572,6 +572,8 @@ export class ProxyRelayService {
         }
         void this.handleHttpRequest(entry, req, res);
       });
+      // Android toybox nc half-closes right after sending the request; keep our side open until we respond.
+      (server as unknown as { httpAllowHalfOpen: boolean }).httpAllowHalfOpen = true;
 
       server.on('connect', (req, clientSocket: net.Socket, head) => {
         const entry = entryPlaceholder.entry;
@@ -704,6 +706,42 @@ export class ProxyRelayService {
     }
   }
 
+  private readRequestBody(req: http.IncomingMessage, stats: ProxyRelayStats): Promise<Buffer> {
+    if (req.complete) {
+      return Promise.resolve(Buffer.alloc(0));
+    }
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let settled = false;
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        req.off('data', onData);
+        req.off('end', onEnd);
+        req.off('aborted', onAborted);
+        req.off('close', onClose);
+        req.off('error', onError);
+        if (err) reject(err);
+        else resolve(Buffer.concat(chunks));
+      };
+      const onData = (c: Buffer | string) => {
+        const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
+        stats.bytesOut += buf.length;
+        chunks.push(buf);
+      };
+      const onEnd = () => finish();
+      const onAborted = () => finish();
+      const onClose = () => finish();
+      const onError = (err: Error) => finish(err);
+
+      req.on('data', onData);
+      req.once('end', onEnd);
+      req.once('aborted', onAborted);
+      req.once('close', onClose);
+      req.once('error', onError);
+    });
+  }
+
   private async handleHttpRequest(
     entry: RelayEntry,
     req: http.IncomingMessage,
@@ -719,6 +757,9 @@ export class ProxyRelayService {
       }
     };
     res.on('close', done);
+    res.once('finish', () => {
+      if (req.socket.readableEnded && !req.socket.writableEnded) req.socket.end();
+    });
     res.on('finish', done);
 
     try {
@@ -778,14 +819,25 @@ export class ProxyRelayService {
             res.destroy();
           }
         });
-        req.on('data', (c: Buffer) => {
-          entry.stats.bytesOut += c.length;
-        });
-        req.pipe(upReq);
+        const isEmptyGetOrHead =
+          (req.method === 'GET' || req.method === 'HEAD') &&
+          !req.headers['content-length'] &&
+          !req.headers['transfer-encoding'];
+        if (isEmptyGetOrHead) {
+          req.resume();
+          upReq.end();
+        } else {
+          req.on('data', (c: Buffer) => {
+            entry.stats.bytesOut += c.length;
+          });
+          req.pipe(upReq);
+        }
         return;
       }
 
-      // SOCKS5 upstream or bypassed direct HTTP
+      // SOCKS5 upstream or bypassed direct HTTP: read request body before opening upstream tunnel
+      // so half-closed HTTP/1.0 clients (e.g. toybox nc) do not abort during async dial.
+      const reqBody = await this.readRequestBody(req, entry.stats);
       const targetPort = Number(targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80));
       const tunnelSocket = bypassed
         ? await connectRawTcp(targetUrl.hostname, targetPort, 12000)
@@ -793,14 +845,6 @@ export class ProxyRelayService {
 
       entry.sockets.add(tunnelSocket);
       tunnelSocket.on('close', () => entry.sockets.delete(tunnelSocket));
-
-      const bodyChunks: Buffer[] = [];
-      for await (const c of req) {
-        const buf = Buffer.isBuffer(c) ? c : Buffer.from(c);
-        entry.stats.bytesOut += buf.length;
-        bodyChunks.push(buf);
-      }
-      const reqBody = Buffer.concat(bodyChunks);
 
       const outLines = [`${req.method ?? 'GET'} ${targetUrl.pathname}${targetUrl.search} HTTP/1.1`];
       const skipHeaders = new Set(['proxy-connection', 'proxy-authorization', 'connection']);
@@ -1056,12 +1100,14 @@ export class ProxyRelayService {
     const start = Date.now();
     const testedAt = new Date().toISOString();
     const relay = this.getRelayInfo(instance.id);
+    let androidHttpProxy: string | null = null;
+    let viaProxy = Boolean(instance.proxyConfig);
 
     try {
       const settingRes = await adb.shell(instance.adbTarget, 'settings get global http_proxy');
       const rawSetting = settingRes.stdout.trim();
-      const androidHttpProxy = rawSetting && rawSetting !== 'null' && rawSetting !== ':0' ? rawSetting : null;
-      const viaProxy = Boolean(androidHttpProxy && androidHttpProxy.includes(':'));
+      androidHttpProxy = rawSetting && rawSetting !== 'null' && rawSetting !== ':0' ? rawSetting : null;
+      viaProxy = Boolean(androidHttpProxy && androidHttpProxy.includes(':'));
 
       let cmd: string;
       if (viaProxy && androidHttpProxy) {
@@ -1102,8 +1148,8 @@ export class ProxyRelayService {
     } catch (err) {
       return {
         instanceId: instance.id,
-        viaProxy: Boolean(instance.proxyConfig),
-        androidHttpProxy: null,
+        viaProxy,
+        androidHttpProxy,
         relayEndpoint: relay.relayEndpoint,
         ok: false,
         latencyMs: Date.now() - start,
