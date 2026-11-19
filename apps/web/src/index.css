@@ -2,6 +2,202 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-ground: #f2f2ee;
+  --bg-surface: #ffffff;
+  --bg-subtle: #e6e6e0;
+  --bg-terminal: #141413;
+  --ink: #111111;
+  --ink-secondary: #3e3e39;
+  --ink-muted: #55554f;
+  --ink-terminal: #f2f2ee;
+  --accent: #c7f900;
+  --accent-hover: #b5e400;
+  --accent-ink: #111111;
+  --border: #111111;
+  --border-subtle: #c8c8c0;
+  --shadow-color: #111111;
+  --status-ok-bg: #d6f8df;
+  --status-ok-ink: #0b4a22;
+  --status-warn-bg: #fcefc0;
+  --status-warn-ink: #6a3506;
+  --status-err-bg: #fadad8;
+  --status-err-ink: #7f1519;
+  --status-idle-bg: #e6e6e0;
+  --status-idle-ink: #32322d;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg-ground: #111111;
+  --bg-surface: #1b1b19;
+  --bg-subtle: #262623;
+  --bg-terminal: #090908;
+  --ink: #f4f4ee;
+  --ink-secondary: #c6c6bd;
+  --ink-muted: #9e9e95;
+  --ink-terminal: #f2f2ee;
+  --accent: #c7f900;
+  --accent-hover: #d4ff2e;
+  --accent-ink: #111111;
+  --border: #e5e5dc;
+  --border-subtle: #3a3a35;
+  --shadow-color: #000000;
+  --status-ok-bg: #10311d;
+  --status-ok-ink: #75f0a4;
+  --status-warn-bg: #362608;
+  --status-warn-ink: #fad96b;
+  --status-err-bg: #3b1416;
+  --status-err-ink: #fca5a5;
+  --status-idle-bg: #262623;
+  --status-idle-ink: #c6c6bd;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: var(--bg-ground);
+    color: var(--ink);
+    font-family: 'Archivo', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    overflow-x: hidden;
+  }
+
+  pre,
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 3px solid var(--ink);
+    outline-offset: 2px;
+  }
+
+  :root[data-theme='dark'] a:focus-visible,
+  :root[data-theme='dark'] button:focus-visible,
+  :root[data-theme='dark'] input:focus-visible,
+  :root[data-theme='dark'] select:focus-visible,
+  :root[data-theme='dark'] textarea:focus-visible,
+  :root[data-theme='dark'] [tabindex]:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .nb-panel {
+    background-color: var(--bg-surface);
+    border: 2px solid var(--border);
+  }
+
+  .nb-panel-elevated {
+    background-color: var(--bg-surface);
+    border: 2px solid var(--border);
+    box-shadow: 4px 4px 0 var(--shadow-color);
+  }
+
+  .nb-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    min-height: 44px;
+    padding: 0 0.875rem;
+    border: 2px solid var(--border);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.2;
+    cursor: pointer;
+    user-select: none;
+    transition: transform 110ms ease-out, box-shadow 110ms ease-out, background-color 110ms ease-out;
+  }
+
+  @media (min-width: 768px) {
+    .nb-btn {
+      min-height: 38px;
+    }
+  }
+
+  .nb-btn:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+  }
+
+  .nb-btn-primary {
+    background-color: var(--accent);
+    color: var(--accent-ink);
+    box-shadow: 3px 3px 0 var(--shadow-color);
+  }
+
+  .nb-btn-primary:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+  }
+
+  .nb-btn-primary:active:not(:disabled) {
+    transform: translate(2px, 2px);
+    box-shadow: 1px 1px 0 var(--shadow-color);
+  }
+
+  .nb-btn-secondary {
+    background-color: var(--bg-surface);
+    color: var(--ink);
+  }
+
+  .nb-btn-secondary:hover:not(:disabled) {
+    background-color: var(--bg-subtle);
+  }
+
+  .nb-btn-secondary:active:not(:disabled) {
+    transform: translate(1px, 1px);
+  }
+
+  .nb-btn-danger {
+    background-color: var(--status-err-bg);
+    color: var(--status-err-ink);
+  }
+
+  .nb-btn-danger:hover:not(:disabled) {
+    filter: brightness(0.95);
+  }
+
+  .nb-btn-danger:active:not(:disabled) {
+    transform: translate(1px, 1px);
+  }
+
+  .nb-input {
+    width: 100%;
+    min-height: 44px;
+    padding: 0 0.75rem;
+    background-color: var(--bg-surface);
+    color: var(--ink);
+    border: 2px solid var(--border);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  .nb-input::placeholder {
+    color: var(--ink-muted);
+  }
+
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nb-btn {
+    transition: none;
+  }
+
+  .nb-btn-primary:active:not(:disabled),
+  .nb-btn-secondary:active:not(:disabled),
+  .nb-btn-danger:active:not(:disabled) {
+    transform: none;
+  }
 }

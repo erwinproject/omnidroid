@@ -1,11 +1,25 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>DroidForge — Redroid Android Emulator Control Center</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>DroidForge: Redroid Android Emulator Control Center</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&display=swap"
+    />
+    <script>
+      try {
+        var savedTheme = localStorage.getItem('droidforge_theme');
+        if (savedTheme === 'dark' || savedTheme === 'light') {
+          document.documentElement.dataset.theme = savedTheme;
+        }
+      } catch (e) {}
+    </script>
   </head>
-  <body class="bg-zinc-950 text-zinc-100 antialiased">
+  <body class="bg-[var(--bg-ground)] text-[var(--ink)] antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

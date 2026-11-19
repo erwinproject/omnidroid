@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import type { CreateInstanceInput, DeviceProfile } from '@droidforge/shared';
-import { Shuffle, ShieldCheck, X } from 'lucide-react';
+import { RefreshCw, ShieldCheck, Shuffle, X } from 'lucide-react';
 import { createClient } from '../api/client';
 
 interface Props {
@@ -11,6 +11,9 @@ interface Props {
 
 export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated }) => {
   const [profiles, setProfiles] = useState<DeviceProfile[]>([]);
+  const [profilesLoading, setProfilesLoading] = useState(false);
+  const [randomizing, setRandomizing] = useState(false);
+
   const [name, setName] = useState(`android-${Math.floor(1000 + Math.random() * 9000)}`);
   const [androidVersion, setAndroidVersion] = useState<'11' | '12' | '13' | '14'>('13');
   const [profileId, setProfileId] = useState('pixel-8-pro');
@@ -21,7 +24,6 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   const [proxy, setProxy] = useState('');
   const [customImage, setCustomImage] = useState('');
 
-  // Custom model / brand / type / fingerprint overrides
   const [brand, setBrand] = useState('');
   const [manufacturer, setManufacturer] = useState('');
   const [model, setModel] = useState('');
@@ -37,8 +39,9 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
+  function loadProfiles() {
+    setProfilesLoading(true);
+    setError(null);
     createClient()
       .profiles.list()
       .then((list) => {
@@ -46,8 +49,23 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
         const initial = list.find((p) => p.id === profileId) ?? list[0];
         if (initial) applyPresetFields(initial);
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setProfilesLoading(false));
+  }
+
+  useEffect(() => {
+    if (!open) return;
+    loadProfiles();
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape' && !submitting) onClose();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, submitting, onClose]);
 
   function applyPresetFields(p: DeviceProfile) {
     setProfileId(p.id);
@@ -62,11 +80,19 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   }
 
   async function handleRandomize() {
-    const selected = profiles.find((p) => p.id === profileId);
-    const id = await createClient().profiles.generateIdentity(selected?.macOui);
-    setSerialNo(id.serialNo);
-    setAndroidId(id.androidId);
-    setMacAddress(id.macAddress);
+    setRandomizing(true);
+    setError(null);
+    try {
+      const selected = profiles.find((p) => p.id === profileId);
+      const id = await createClient().profiles.generateIdentity(selected?.macOui);
+      setSerialNo(id.serialNo);
+      setAndroidId(id.androidId);
+      setMacAddress(id.macAddress);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRandomizing(false);
+    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -114,266 +140,369 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
-      <div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">Create Redroid Android Instance</h2>
-          <button onClick={onClose} className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-white">
-            <X className="h-5 w-5" />
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 sm:p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !submitting) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="create-instance-title"
+        className="nb-panel-elevated flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden"
+      >
+        <div className="flex shrink-0 items-center justify-between border-b-2 border-[var(--border)] bg-[var(--bg-subtle)] px-4 py-3">
+          <h2 id="create-instance-title" className="text-base font-extrabold text-[var(--ink)] sm:text-lg">
+            Create Redroid Android Instance
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={submitting}
+            aria-label="Close Create Instance dialog"
+            className="nb-btn nb-btn-secondary px-2.5"
+          >
+            <X className="h-4 w-4" />
           </button>
         </div>
 
-        {error && (
-          <div className="mb-4 rounded-lg border border-red-800 bg-red-950/60 p-3 text-sm text-red-200">{error}</div>
-        )}
-
-        <form onSubmit={handleSubmit} className="space-y-4 text-sm">
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">Instance Name</label>
-              <input
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">Android Version</label>
-              <select
-                value={androidVersion}
-                onChange={(e) => setAndroidVersion(e.target.value as '11' | '12' | '13' | '14')}
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-white"
-              >
-                <option value="11">Android 11</option>
-                <option value="12">Android 12</option>
-                <option value="13">Android 13 (Recommended)</option>
-                <option value="14">Android 14</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 font-medium text-emerald-400">
-                <ShieldCheck className="h-4 w-4" />
-                <span>Device Profile & Anti-Emulator Stealth</span>
+        <form onSubmit={handleSubmit} className="flex min-h-0 flex-1 flex-col">
+          <div className="flex-1 space-y-4 overflow-y-auto p-4 text-sm">
+            {error && (
+              <div className="flex flex-wrap items-center justify-between gap-2 border-2 border-[var(--border)] bg-[var(--status-err-bg)] p-3 text-[13px] font-medium text-[var(--status-err-ink)]">
+                <span>{error}</span>
+                {profiles.length === 0 && (
+                  <button type="button" onClick={loadProfiles} className="nb-btn nb-btn-secondary">
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Retry Presets
+                  </button>
+                )}
               </div>
-              <button
-                type="button"
-                onClick={handleRandomize}
-                className="flex items-center gap-1.5 rounded-md bg-zinc-800 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-700"
-              >
-                <Shuffle className="h-3.5 w-3.5" />
-                Randomize Identity
-              </button>
-            </div>
+            )}
 
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">Device Preset</label>
-              <select
-                value={profileId}
-                onChange={(e) => {
-                  const found = profiles.find((p) => p.id === e.target.value);
-                  if (found) applyPresetFields(found);
-                }}
-                className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-white"
-              >
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.brand} / {p.model})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
-                <label className="mb-1 block text-xs text-zinc-400">Brand</label>
+                <label htmlFor="inst-name" className="mb-1.5 block text-[13px] font-bold text-[var(--ink)]">
+                  Instance Name
+                </label>
                 <input
-                  value={brand}
-                  onChange={(e) => setBrand(e.target.value)}
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-white"
+                  id="inst-name"
+                  required
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="nb-input"
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs text-zinc-400">Manufacturer</label>
-                <input
-                  value={manufacturer}
-                  onChange={(e) => setManufacturer(e.target.value)}
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-white"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs text-zinc-400">Model</label>
-                <input
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-white"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2">
-              <div>
-                <label className="mb-1 block text-xs text-zinc-400">Build Type</label>
+                <label htmlFor="inst-android" className="mb-1.5 block text-[13px] font-bold text-[var(--ink)]">
+                  Android Version
+                </label>
                 <select
-                  value={buildType}
-                  onChange={(e) => setBuildType(e.target.value as 'user' | 'userdebug')}
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-white"
+                  id="inst-android"
+                  value={androidVersion}
+                  onChange={(e) => setAndroidVersion(e.target.value as '11' | '12' | '13' | '14')}
+                  className="nb-input"
                 >
-                  <option value="user">user (Production)</option>
-                  <option value="userdebug">userdebug</option>
+                  <option value="11">Android 11</option>
+                  <option value="12">Android 12</option>
+                  <option value="13">Android 13 (Recommended)</option>
+                  <option value="14">Android 14</option>
                 </select>
               </div>
+            </div>
+
+            <div className="space-y-3 border-2 border-[var(--border)] bg-[var(--bg-ground)] p-3 sm:p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-extrabold text-[var(--ink)]">
+                  <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>Device Profile and Stealth Identity</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleRandomize()}
+                  disabled={randomizing}
+                  className="nb-btn nb-btn-secondary"
+                >
+                  <Shuffle className="h-3.5 w-3.5" aria-hidden="true" />
+                  {randomizing ? 'Generating...' : 'Randomize Identity'}
+                </button>
+              </div>
+
               <div>
-                <label className="mb-1 block text-xs text-zinc-400">Build Tags</label>
+                <label htmlFor="inst-preset" className="mb-1.5 block text-[13px] font-bold text-[var(--ink)]">
+                  Device Preset
+                </label>
+                <select
+                  id="inst-preset"
+                  disabled={profilesLoading}
+                  value={profileId}
+                  onChange={(e) => {
+                    const found = profiles.find((p) => p.id === e.target.value);
+                    if (found) applyPresetFields(found);
+                  }}
+                  className="nb-input"
+                >
+                  {profilesLoading ? (
+                    <option value={profileId}>Loading device presets...</option>
+                  ) : profiles.length === 0 ? (
+                    <option value={profileId}>{profileId}</option>
+                  ) : (
+                    profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.brand} / {p.model})
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label htmlFor="inst-brand" className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]">
+                    Brand
+                  </label>
+                  <input
+                    id="inst-brand"
+                    value={brand}
+                    onChange={(e) => setBrand(e.target.value)}
+                    className="nb-input"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="inst-manufacturer"
+                    className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]"
+                  >
+                    Manufacturer
+                  </label>
+                  <input
+                    id="inst-manufacturer"
+                    value={manufacturer}
+                    onChange={(e) => setManufacturer(e.target.value)}
+                    className="nb-input"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="inst-model" className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]">
+                    Model
+                  </label>
+                  <input
+                    id="inst-model"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    className="nb-input"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label
+                    htmlFor="inst-build-type"
+                    className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]"
+                  >
+                    Build Type
+                  </label>
+                  <select
+                    id="inst-build-type"
+                    value={buildType}
+                    onChange={(e) => setBuildType(e.target.value as 'user' | 'userdebug')}
+                    className="nb-input"
+                  >
+                    <option value="user">user (Production)</option>
+                    <option value="userdebug">userdebug</option>
+                  </select>
+                </div>
+                <div>
+                  <label
+                    htmlFor="inst-build-tags"
+                    className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]"
+                  >
+                    Build Tags
+                  </label>
+                  <input
+                    id="inst-build-tags"
+                    value={buildTags}
+                    onChange={(e) => setBuildTags(e.target.value)}
+                    className="nb-input"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="inst-carrier"
+                    className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]"
+                  >
+                    Carrier
+                  </label>
+                  <input
+                    id="inst-carrier"
+                    value={carrierName}
+                    onChange={(e) => setCarrierName(e.target.value)}
+                    className="nb-input"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="inst-fingerprint"
+                  className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]"
+                >
+                  Build Fingerprint
+                </label>
                 <input
-                  value={buildTags}
-                  onChange={(e) => setBuildTags(e.target.value)}
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-white"
+                  id="inst-fingerprint"
+                  value={buildFingerprint}
+                  onChange={(e) => setBuildFingerprint(e.target.value)}
+                  className="nb-input num text-[13px]"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label
+                    htmlFor="inst-serial"
+                    className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]"
+                  >
+                    Serial No
+                  </label>
+                  <input
+                    id="inst-serial"
+                    value={serialNo}
+                    onChange={(e) => setSerialNo(e.target.value)}
+                    placeholder="Auto-generated"
+                    className="nb-input num text-[13px]"
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="inst-android-id"
+                    className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]"
+                  >
+                    ANDROID_ID (16 hex)
+                  </label>
+                  <input
+                    id="inst-android-id"
+                    value={androidId}
+                    onChange={(e) => setAndroidId(e.target.value)}
+                    placeholder="Auto-generated"
+                    className="nb-input num text-[13px]"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="inst-mac" className="mb-1 block text-[13px] font-semibold text-[var(--ink-secondary)]">
+                    MAC Address
+                  </label>
+                  <input
+                    id="inst-mac"
+                    value={macAddress}
+                    onChange={(e) => setMacAddress(e.target.value)}
+                    placeholder="Auto-generated"
+                    className="nb-input num text-[13px]"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 pt-1 sm:grid-cols-2">
+                <label className="flex min-h-[44px] cursor-pointer items-center gap-2.5 border-2 border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2 text-[13px] font-semibold text-[var(--ink)]">
+                  <input
+                    type="checkbox"
+                    checked={stealthMode}
+                    onChange={(e) => setStealthMode(e.target.checked)}
+                    className="h-4 w-4 shrink-0 accent-[var(--ink)]"
+                  />
+                  <span>Stealth Mode (Anti-Emulator Hardening)</span>
+                </label>
+                <label className="flex min-h-[44px] cursor-pointer items-center gap-2.5 border-2 border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2 text-[13px] font-semibold text-[var(--ink)]">
+                  <input
+                    type="checkbox"
+                    checked={exposeAdbPort}
+                    onChange={(e) => setExposeAdbPort(e.target.checked)}
+                    className="h-4 w-4 shrink-0 accent-[var(--ink)]"
+                  />
+                  <span>Expose Host ADB Port (15555-19999)</span>
+                </label>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div>
+                <label htmlFor="inst-ram" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
+                  RAM (MB)
+                </label>
+                <input
+                  id="inst-ram"
+                  type="number"
+                  min={1024}
+                  max={32768}
+                  step={512}
+                  value={memoryMb}
+                  onChange={(e) => setMemoryMb(Number(e.target.value))}
+                  className="nb-input num"
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs text-zinc-400">Carrier</label>
+                <label htmlFor="inst-cpus" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
+                  vCPUs
+                </label>
                 <input
-                  value={carrierName}
-                  onChange={(e) => setCarrierName(e.target.value)}
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-white"
+                  id="inst-cpus"
+                  type="number"
+                  min={1}
+                  max={16}
+                  value={cpus}
+                  onChange={(e) => setCpus(Number(e.target.value))}
+                  className="nb-input num"
+                />
+              </div>
+              <div>
+                <label htmlFor="inst-timezone" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
+                  Timezone
+                </label>
+                <input
+                  id="inst-timezone"
+                  value={timezone}
+                  onChange={(e) => setTimezone(e.target.value)}
+                  className="nb-input"
                 />
               </div>
             </div>
 
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">Build Fingerprint</label>
-              <input
-                value={buildFingerprint}
-                onChange={(e) => setBuildFingerprint(e.target.value)}
-                className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 font-mono text-xs text-white"
-              />
-            </div>
-
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
-                <label className="mb-1 block text-xs text-zinc-400">Serial No (auto if blank)</label>
+                <label htmlFor="inst-proxy" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
+                  HTTP Proxy (optional, host:port)
+                </label>
                 <input
-                  value={serialNo}
-                  onChange={(e) => setSerialNo(e.target.value)}
-                  placeholder="Auto-generated"
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 font-mono text-xs text-white"
+                  id="inst-proxy"
+                  value={proxy}
+                  onChange={(e) => setProxy(e.target.value)}
+                  placeholder="192.168.1.10:8888"
+                  className="nb-input num"
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs text-zinc-400">ANDROID_ID (16 hex)</label>
+                <label htmlFor="inst-custom-image" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
+                  Custom Redroid Image (optional)
+                </label>
                 <input
-                  value={androidId}
-                  onChange={(e) => setAndroidId(e.target.value)}
-                  placeholder="Auto-generated"
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 font-mono text-xs text-white"
+                  id="inst-custom-image"
+                  value={customImage}
+                  onChange={(e) => setCustomImage(e.target.value)}
+                  placeholder="redroid/redroid:13.0.0-latest"
+                  className="nb-input"
                 />
               </div>
-              <div>
-                <label className="mb-1 block text-xs text-zinc-400">MAC Address</label>
-                <input
-                  value={macAddress}
-                  onChange={(e) => setMacAddress(e.target.value)}
-                  placeholder="Auto-generated"
-                  className="w-full rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 font-mono text-xs text-white"
-                />
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-4 pt-1">
-              <label className="flex items-center gap-2 text-xs text-zinc-200">
-                <input
-                  type="checkbox"
-                  checked={stealthMode}
-                  onChange={(e) => setStealthMode(e.target.checked)}
-                  className="rounded border-zinc-600"
-                />
-                Enable Stealth Mode (Anti-Emulator Hardening)
-              </label>
-              <label className="flex items-center gap-2 text-xs text-zinc-200">
-                <input
-                  type="checkbox"
-                  checked={exposeAdbPort}
-                  onChange={(e) => setExposeAdbPort(e.target.checked)}
-                  className="rounded border-zinc-600"
-                />
-                Expose Unique Host ADB Port (15555–19999)
-              </label>
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">RAM (MB)</label>
-              <input
-                type="number"
-                min={1024}
-                max={32768}
-                step={512}
-                value={memoryMb}
-                onChange={(e) => setMemoryMb(Number(e.target.value))}
-                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-white"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">vCPUs</label>
-              <input
-                type="number"
-                min={1}
-                max={16}
-                value={cpus}
-                onChange={(e) => setCpus(Number(e.target.value))}
-                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-white"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">Timezone</label>
-              <input
-                value={timezone}
-                onChange={(e) => setTimezone(e.target.value)}
-                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-white"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">HTTP Proxy (optional, host:port)</label>
-              <input
-                value={proxy}
-                onChange={(e) => setProxy(e.target.value)}
-                placeholder="192.168.1.10:8888"
-                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-white"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-zinc-400">Custom Redroid Image (optional, e.g. w/ ARM NDK)</label>
-              <input
-                value={customImage}
-                onChange={(e) => setCustomImage(e.target.value)}
-                placeholder="redroid/redroid:13.0.0-latest"
-                className="w-full rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-white"
-              />
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-2 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-lg border border-zinc-700 px-4 py-2 text-zinc-300 hover:bg-zinc-800"
-            >
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t-2 border-[var(--border)] bg-[var(--bg-subtle)] px-4 py-3">
+            <button type="button" onClick={onClose} disabled={submitting} className="nb-btn nb-btn-secondary">
               Cancel
             </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="rounded-lg bg-emerald-600 px-4 py-2 font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-            >
-              {submitting ? 'Creating...' : 'Create & Boot Instance'}
+            <button type="submit" disabled={submitting} className="nb-btn nb-btn-primary">
+              {submitting ? 'Creating Instance...' : 'Create and Boot Instance'}
             </button>
           </div>
         </form>
