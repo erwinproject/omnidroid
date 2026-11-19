@@ -1,0 +1,23 @@
+{
+  "name": "droidforge-emulator-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Full Docker + Redroid Android Emulator Platform with Complete REST/WebSocket API, AI Agent Automation, Stealth Device Profiles, and Live Web Dashboard",
+  "workspaces": [
+    "packages/shared",
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm run dev --workspace=@droidforge/api\" \"npm run dev --workspace=@droidforge/web\"",
+    "dev:api": "npm run dev --workspace=@droidforge/api",
+    "dev:web": "npm run dev --workspace=@droidforge/web",
+    "build": "npm run build --workspace=@droidforge/shared && npm run build --workspace=@droidforge/api && npm run build --workspace=@droidforge/web",
+    "typecheck": "npm run typecheck --workspace=@droidforge/shared && npm run typecheck --workspace=@droidforge/api && npm run typecheck --workspace=@droidforge/web",
+    "test": "npm run test --workspace=@droidforge/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.2"
+  }
+}

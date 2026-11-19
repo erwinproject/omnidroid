@@ -1,0 +1,51 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    container_name: droidforge-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      API_PORT: ${API_PORT:-13000}
+      API_KEY: ${API_KEY:-change-me-super-secret-api-key}
+      REQUIRE_AUTH: ${REQUIRE_AUTH:-true}
+      DOCKER_SOCKET: /var/run/docker.sock
+      DOCKER_NETWORK: ${DOCKER_NETWORK:-emulator-net}
+      REDROID_IMAGE_REPO: ${REDROID_IMAGE_REPO:-redroid/redroid}
+      ADB_PORT_MIN: ${ADB_PORT_MIN:-15555}
+      ADB_PORT_MAX: ${ADB_PORT_MAX:-19999}
+      DATA_DIR: /data
+      ADB_BIN: adb
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - api-data:/data
+    networks:
+      - emulator-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:13000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    container_name: droidforge-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-18080}:80"
+    networks:
+      - emulator-net
+
+networks:
+  emulator-net:
+    name: ${DOCKER_NETWORK:-emulator-net}
+    driver: bridge
+
+volumes:
+  api-data:
+    name: droidforge-api-data

@@ -1,0 +1,219 @@
+import type {
+  AiSnapshotResponse,
+  BatteryInput,
+  CloneInstanceInput,
+  CreateDeviceProfileInput,
+  CreateInstanceInput,
+  DeviceProfile,
+  GeneratedIdentity,
+  GestureInput,
+  InstanceHealth,
+  InstanceRecord,
+  LocationInput,
+  NetworkInput,
+  RotationInput,
+  ShellCommandInput,
+  SnapshotRecord,
+  StealthCheckReport,
+  SwipeInput,
+  TapInput,
+  TextInput,
+  UiBatchActionsInput,
+  UiClickInput,
+  UiNode,
+  UiSelector,
+  UiWaitInput,
+} from '../index.js';
+
+export interface ClientOptions {
+  baseUrl: string;
+  apiKey?: string;
+}
+
+export class EmulatorApiClient {
+  private readonly baseUrl: string;
+  private readonly apiKey?: string;
+
+  constructor(options: ClientOptions) {
+    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.apiKey = options.apiKey;
+  }
+
+  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const headers: Record<string, string> = {
+      ...(init?.body && !(init.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
+      ...(this.apiKey ? { 'X-API-Key': this.apiKey } : {}),
+      ...((init?.headers as Record<string, string>) ?? {}),
+    };
+
+    const res = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers,
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`API Error ${res.status} (${path}): ${text}`);
+    }
+
+    if (res.status === 204) {
+      return undefined as T;
+    }
+
+    const contentType = res.headers.get('content-type') ?? '';
+    if (contentType.includes('application/json')) {
+      return (await res.json()) as T;
+    }
+    return (await res.text()) as unknown as T;
+  }
+
+  readonly profiles = {
+    list: () => this.request<DeviceProfile[]>('/api/v1/profiles'),
+    get: (id: string) => this.request<DeviceProfile>(`/api/v1/profiles/${id}`),
+    create: (input: CreateDeviceProfileInput) =>
+      this.request<DeviceProfile>('/api/v1/profiles', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    delete: (id: string) =>
+      this.request<{ deleted: boolean }>(`/api/v1/profiles/${id}`, { method: 'DELETE' }),
+    generateIdentity: (macOui?: string) =>
+      this.request<GeneratedIdentity>('/api/v1/profiles/generate-identity', {
+        method: 'POST',
+        body: JSON.stringify({ macOui }),
+      }),
+  };
+
+  readonly instances = {
+    list: () => this.request<InstanceRecord[]>('/api/v1/instances'),
+    get: (id: string) => this.request<InstanceRecord>(`/api/v1/instances/${id}`),
+    create: (input: CreateInstanceInput) =>
+      this.request<InstanceRecord>('/api/v1/instances', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    start: (id: string) =>
+      this.request<InstanceRecord>(`/api/v1/instances/${id}/start`, { method: 'POST' }),
+    stop: (id: string) =>
+      this.request<InstanceRecord>(`/api/v1/instances/${id}/stop`, { method: 'POST' }),
+    restart: (id: string) =>
+      this.request<InstanceRecord>(`/api/v1/instances/${id}/restart`, { method: 'POST' }),
+    delete: (id: string, removeVolume = false) =>
+      this.request<{ deleted: boolean }>(
+        `/api/v1/instances/${id}?removeVolume=${String(removeVolume)}`,
+        { method: 'DELETE' },
+      ),
+    health: (id: string) => this.request<InstanceHealth>(`/api/v1/instances/${id}/health`),
+    clone: (id: string, input: CloneInstanceInput) =>
+      this.request<InstanceRecord>(`/api/v1/instances/${id}/clone`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    listSnapshots: (id: string) =>
+      this.request<SnapshotRecord[]>(`/api/v1/instances/${id}/snapshots`),
+    createSnapshot: (id: string, name?: string) =>
+      this.request<SnapshotRecord>(`/api/v1/instances/${id}/snapshots`, {
+        method: 'POST',
+        body: JSON.stringify({ name }),
+      }),
+    restoreSnapshot: (id: string, snapId: string) =>
+      this.request<{ restored: boolean }>(`/api/v1/instances/${id}/snapshots/${snapId}/restore`, {
+        method: 'POST',
+      }),
+  };
+
+  readonly input = {
+    tap: (id: string, input: TapInput) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/input/tap`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    swipe: (id: string, input: SwipeInput) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/input/swipe`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    text: (id: string, input: TextInput) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/input/text`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    keyevent: (id: string, key: string | number) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/input/keyevent`, {
+        method: 'POST',
+        body: JSON.stringify({ key }),
+      }),
+    gesture: (id: string, input: GestureInput) =>
+      this.request<{ ok: boolean; executedSteps: number }>(`/api/v1/instances/${id}/input/gesture`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+  };
+
+  readonly ui = {
+    hierarchy: (id: string) =>
+      this.request<{ xml: string; tree: UiNode[] }>(`/api/v1/instances/${id}/ui/hierarchy`),
+    aiSnapshot: (id: string) =>
+      this.request<AiSnapshotResponse>(`/api/v1/instances/${id}/ui/ai-snapshot`),
+    find: (id: string, selector: UiSelector) =>
+      this.request<{ count: number; nodes: UiNode[] }>(`/api/v1/instances/${id}/ui/find`, {
+        method: 'POST',
+        body: JSON.stringify(selector),
+      }),
+    click: (id: string, input: UiClickInput) =>
+      this.request<{ ok: boolean; clicked: { x: number; y: number } }>(
+        `/api/v1/instances/${id}/ui/click`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      ),
+    wait: (id: string, input: UiWaitInput) =>
+      this.request<{ matched: boolean; elapsedMs: number }>(`/api/v1/instances/${id}/ui/wait`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    batch: (id: string, input: UiBatchActionsInput) =>
+      this.request<{ ok: boolean; results: unknown[]; finalScreenshotBase64?: string }>(
+        `/api/v1/instances/${id}/ui/actions/batch`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      ),
+  };
+
+  readonly device = {
+    info: (id: string) => this.request<Record<string, unknown>>(`/api/v1/instances/${id}/device/info`),
+    shell: (id: string, input: ShellCommandInput) =>
+      this.request<{ exitCode: number; stdout: string; stderr: string }>(
+        `/api/v1/instances/${id}/device/shell`,
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      ),
+    location: (id: string, input: LocationInput) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/device/location`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    battery: (id: string, input: BatteryInput) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/device/battery`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    network: (id: string, input: NetworkInput) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/device/network`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    rotation: (id: string, input: RotationInput) =>
+      this.request<{ ok: boolean }>(`/api/v1/instances/${id}/device/rotation`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    stealthCheck: (id: string) =>
+      this.request<StealthCheckReport>(`/api/v1/instances/${id}/device/stealth-check`),
+  };
+}

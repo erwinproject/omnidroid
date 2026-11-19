@@ -1,0 +1,306 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import Docker from 'dockerode';
+import type { DeviceProfile, InstanceRecord } from '@droidforge/shared';
+import type { AppEnv } from '../config/env.js';
+
+export interface ContainerStatsResult {
+  running: boolean;
+  cpuPercent: number | null;
+  memoryUsageMb: number | null;
+  memoryLimitMb: number | null;
+}
+
+export function buildRedroidBootArgs(instance: {
+  width: number;
+  height: number;
+  dpi: number;
+  fps: number;
+  gpuMode: 'guest' | 'host' | 'auto';
+  stealthMode: boolean;
+  profile: DeviceProfile;
+  customProps: Record<string, string>;
+}): string[] {
+  const { width, height, dpi, fps, gpuMode, stealthMode, profile, customProps } = instance;
+
+  const props: Record<string, string> = {
+    'androidboot.redroid_width': String(width),
+    'androidboot.redroid_height': String(height),
+    'androidboot.redroid_dpi': String(dpi),
+    'androidboot.redroid_fps': String(fps),
+    'androidboot.redroid_gpu_mode': gpuMode,
+    'androidboot.use_memfd': 'true',
+  };
+
+  // Device identity & build props (model, brand, manufacturer, device, type, fingerprint)
+  const productPartitions = ['', 'system.', 'vendor.', 'odm.', 'product.', 'system_ext.'];
+  for (const part of productPartitions) {
+    props[`ro.product.${part}brand`] = profile.brand;
+    props[`ro.product.${part}manufacturer`] = profile.manufacturer;
+    props[`ro.product.${part}model`] = profile.model;
+    props[`ro.product.${part}device`] = profile.device;
+    props[`ro.product.${part}name`] = profile.product;
+  }
+
+  props['ro.build.fingerprint'] = profile.buildFingerprint;
+  props['ro.system.build.fingerprint'] = profile.buildFingerprint;
+  props['ro.vendor.build.fingerprint'] = profile.buildFingerprint;
+  props['ro.bootimage.build.fingerprint'] = profile.buildFingerprint;
+  props['ro.build.id'] = profile.buildId;
+  props['ro.build.type'] = profile.buildType;
+  props['ro.build.tags'] = profile.buildTags;
+  props['ro.build.version.security_patch'] = profile.securityPatch;
+  props['ro.hardware'] = profile.hardware;
+  props['ro.boot.hardware'] = profile.hardware;
+  props['ro.product.board'] = profile.board;
+  props['ro.board.platform'] = profile.platform;
+
+  if (profile.serialNo) {
+    props['ro.serialno'] = profile.serialNo;
+    props['ro.boot.serialno'] = profile.serialNo;
+  }
+
+  // Locale, timezone & carrier
+  props['persist.sys.locale'] = profile.locale;
+  props['persist.sys.timezone'] = profile.timezone;
+  props['gsm.operator.alpha'] = profile.carrierName;
+  props['gsm.sim.operator.alpha'] = profile.carrierName;
+  props['gsm.operator.numeric'] = profile.carrierMccMnc;
+  props['gsm.sim.operator.numeric'] = profile.carrierMccMnc;
+  props['gsm.operator.iso-country'] = profile.countryIso;
+  props['gsm.sim.operator.iso-country'] = profile.countryIso;
+  props['gsm.sim.state'] = 'READY';
+
+  if (stealthMode) {
+    props['ro.build.type'] = 'user';
+    props['ro.build.tags'] = 'release-keys';
+    props['ro.debuggable'] = '0';
+    props['ro.secure'] = '1';
+    props['ro.boot.verifiedbootstate'] = 'green';
+    props['ro.boot.flash.locked'] = '1';
+    props['ro.boot.vbmeta.device_state'] = 'locked';
+    props['ro.kernel.qemu'] = '0';
+    props['ro.boot.qemu'] = '0';
+    props['ro.build.characteristics'] = 'default';
+  }
+
+  // User explicit customProps override everything else
+  for (const [k, v] of Object.entries(customProps)) {
+    props[k] = v;
+  }
+
+  return Object.entries(props).map(([k, v]) => `${k}=${v}`);
+}
+
+export class RedroidDockerManager {
+  private readonly docker: Docker;
+  private readonly env: AppEnv;
+
+  constructor(env: AppEnv, dockerClient?: Docker) {
+    this.env = env;
+    this.docker = dockerClient ?? new Docker({ socketPath: env.DOCKER_SOCKET });
+  }
+
+  async ensureNetwork(): Promise<void> {
+    const networks = await this.docker.listNetworks({
+      filters: { name: [this.env.DOCKER_NETWORK] },
+    });
+    const exists = networks.some((n) => n.Name === this.env.DOCKER_NETWORK);
+    if (!exists) {
+      await this.docker.createNetwork({
+        Name: this.env.DOCKER_NETWORK,
+        Driver: 'bridge',
+      });
+    }
+  }
+
+  async ensureImage(image: string): Promise<void> {
+    try {
+      await this.docker.getImage(image).inspect();
+      return;
+    } catch {
+      // Pull image if not present locally
+    }
+
+    const stream = await this.docker.pull(image);
+    await new Promise<void>((resolve, reject) => {
+      this.docker.modem.followProgress(stream, (err: Error | null) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  async createContainer(instance: InstanceRecord): Promise<string> {
+    await this.ensureNetwork();
+    await this.ensureImage(instance.image);
+
+    const cmd = buildRedroidBootArgs({
+      width: instance.width,
+      height: instance.height,
+      dpi: instance.dpi,
+      fps: instance.fps,
+      gpuMode: instance.gpuMode,
+      stealthMode: instance.stealthMode,
+      profile: instance.profile,
+      customProps: instance.customProps,
+    });
+
+    const portBindings: Record<string, Array<{ HostPort: string }>> = {};
+    const exposedPorts: Record<string, Record<string, never>> = { '5555/tcp': {} };
+    if (instance.hostAdbPort) {
+      portBindings['5555/tcp'] = [{ HostPort: String(instance.hostAdbPort) }];
+    }
+
+    const container = await this.docker.createContainer({
+      name: instance.containerName,
+      Hostname: instance.containerName,
+      Image: instance.image,
+      MacAddress: instance.profile.macAddress,
+      Cmd: cmd,
+      ExposedPorts: exposedPorts,
+      Labels: {
+        'droidforge.managed': 'true',
+        'droidforge.instance_id': instance.id,
+        'droidforge.instance_name': instance.name,
+      },
+      HostConfig: {
+        Privileged: true,
+        Memory: instance.memoryMb * 1024 * 1024,
+        NanoCpus: Math.round(instance.cpus * 1e9),
+        Binds: [`${instance.volumeName}:/data`],
+        PortBindings: portBindings,
+        RestartPolicy: { Name: 'unless-stopped' },
+        NetworkMode: this.env.DOCKER_NETWORK,
+      },
+    });
+
+    return container.id;
+  }
+
+  async startContainer(containerId: string): Promise<void> {
+    const container = this.docker.getContainer(containerId);
+    const info = await container.inspect();
+    if (!info.State.Running) {
+      await container.start();
+    }
+  }
+
+  async stopContainer(containerId: string): Promise<void> {
+    const container = this.docker.getContainer(containerId);
+    try {
+      const info = await container.inspect();
+      if (info.State.Running) {
+        await container.stop({ t: 10 });
+      }
+    } catch {
+      // Container might already be stopped or missing
+    }
+  }
+
+  async restartContainer(containerId: string): Promise<void> {
+    const container = this.docker.getContainer(containerId);
+    await container.restart({ t: 10 });
+  }
+
+  async removeContainer(containerId: string | null, volumeName?: string, removeVolume = false): Promise<void> {
+    if (containerId) {
+      const container = this.docker.getContainer(containerId);
+      try {
+        await container.remove({ force: true });
+      } catch {
+        // Ignore if already removed
+      }
+    }
+
+    if (removeVolume && volumeName) {
+      try {
+        await this.docker.getVolume(volumeName).remove({ force: true });
+      } catch {
+        // Ignore if volume doesn't exist
+      }
+    }
+  }
+
+  async getContainerStats(containerId: string | null): Promise<ContainerStatsResult> {
+    if (!containerId) {
+      return { running: false, cpuPercent: null, memoryUsageMb: null, memoryLimitMb: null };
+    }
+    try {
+      const container = this.docker.getContainer(containerId);
+      const info = await container.inspect();
+      if (!info.State.Running) {
+        return { running: false, cpuPercent: 0, memoryUsageMb: 0, memoryLimitMb: null };
+      }
+
+      const stats = (await container.stats({ stream: false })) as unknown as {
+        cpu_stats: { cpu_usage: { total_usage: number }; system_cpu_usage?: number; online_cpus?: number };
+        precpu_stats: { cpu_usage: { total_usage: number }; system_cpu_usage?: number };
+        memory_stats: { usage?: number; limit?: number };
+      };
+
+      const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - (stats.precpu_stats.cpu_usage?.total_usage ?? 0);
+      const sysDelta = (stats.cpu_stats.system_cpu_usage ?? 0) - (stats.precpu_stats.system_cpu_usage ?? 0);
+      const cpus = stats.cpu_stats.online_cpus ?? 1;
+      const cpuPercent = sysDelta > 0 ? Number(((cpuDelta / sysDelta) * cpus * 100).toFixed(2)) : 0;
+
+      const memUsage = stats.memory_stats.usage ? Math.round(stats.memory_stats.usage / (1024 * 1024)) : null;
+      const memLimit = stats.memory_stats.limit ? Math.round(stats.memory_stats.limit / (1024 * 1024)) : null;
+
+      return { running: true, cpuPercent, memoryUsageMb: memUsage, memoryLimitMb: memLimit };
+    } catch {
+      return { running: false, cpuPercent: null, memoryUsageMb: null, memoryLimitMb: null };
+    }
+  }
+
+  async cloneVolume(sourceVolume: string, targetVolume: string): Promise<void> {
+    await this.ensureImage('alpine:3.20');
+    const helper = await this.docker.createContainer({
+      Image: 'alpine:3.20',
+      Cmd: ['sh', '-c', 'cp -a /from/. /to/'],
+      HostConfig: {
+        Binds: [`${sourceVolume}:/from:ro`, `${targetVolume}:/to`],
+        AutoRemove: true,
+      },
+    });
+    await helper.start();
+    await helper.wait();
+  }
+
+  async backupVolumeToTar(volumeName: string, destTarPath: string): Promise<number> {
+    await this.ensureImage('alpine:3.20');
+    const dir = path.resolve(path.dirname(destTarPath));
+    const file = path.basename(destTarPath);
+    fs.mkdirSync(dir, { recursive: true });
+
+    const helper = await this.docker.createContainer({
+      Image: 'alpine:3.20',
+      Cmd: ['sh', '-c', `tar -czf /backup/${file} -C /data .`],
+      HostConfig: {
+        Binds: [`${volumeName}:/data:ro`, `${dir}:/backup`],
+        AutoRemove: true,
+      },
+    });
+    await helper.start();
+    await helper.wait();
+
+    return fs.existsSync(destTarPath) ? fs.statSync(destTarPath).size : 0;
+  }
+
+  async restoreVolumeFromTar(volumeName: string, srcTarPath: string): Promise<void> {
+    await this.ensureImage('alpine:3.20');
+    const dir = path.resolve(path.dirname(srcTarPath));
+    const file = path.basename(srcTarPath);
+
+    const helper = await this.docker.createContainer({
+      Image: 'alpine:3.20',
+      Cmd: ['sh', '-c', `rm -rf /data/* && tar -xzf /backup/${file} -C /data`],
+      HostConfig: {
+        Binds: [`${volumeName}:/data`, `${dir}:/backup:ro`],
+        AutoRemove: true,
+      },
+    });
+    await helper.start();
+    await helper.wait();
+  }
+}
