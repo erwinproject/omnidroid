@@ -1,4 +1,7 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -19,6 +22,8 @@ export interface AdbExecutor {
   pushFile(target: string, localPath: string, remotePath: string): Promise<ShellResult>;
   pullFile(target: string, remotePath: string, localPath: string): Promise<ShellResult>;
   isBootCompleted(target: string): Promise<boolean>;
+  getPublicKey?(): Promise<string | null>;
+  isAuthorized?(target: string): Promise<boolean>;
   spawnLogcat(target: string, args?: string[]): ChildProcess;
 }
 
@@ -118,6 +123,23 @@ export class AdbService implements AdbExecutor {
   async isBootCompleted(target: string): Promise<boolean> {
     const res = await this.shell(target, 'getprop sys.boot_completed', 4000);
     return res.exitCode === 0 && res.stdout.trim() === '1';
+  }
+
+  async getPublicKey(): Promise<string | null> {
+    const pubKeyPath = path.join(os.homedir(), '.android', 'adbkey.pub');
+    if (!fs.existsSync(pubKeyPath)) {
+      await this.runAdb(['start-server'], 8000);
+    }
+    if (!fs.existsSync(pubKeyPath)) {
+      return null;
+    }
+    const key = fs.readFileSync(pubKeyPath, 'utf8').trim();
+    return key.length > 0 ? key : null;
+  }
+
+  async isAuthorized(target: string): Promise<boolean> {
+    const res = await this.runAdb(['-s', target, 'get-state'], 5000);
+    return res.exitCode === 0 && res.stdout.trim() === 'device';
   }
 
   spawnLogcat(target: string, args: string[] = []): ChildProcess {

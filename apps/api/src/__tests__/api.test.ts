@@ -26,6 +26,7 @@ function createMockDocker(): RedroidDockerManager {
     startContainer: vi.fn().mockResolvedValue(undefined),
     stopContainer: vi.fn().mockResolvedValue(undefined),
     restartContainer: vi.fn().mockResolvedValue(undefined),
+    authorizeAdbKey: vi.fn().mockResolvedValue(false),
     removeContainer: vi.fn().mockResolvedValue(undefined),
     getContainerStats: vi.fn().mockResolvedValue({
       running: true,
@@ -105,6 +106,8 @@ async function createMockAdb(stealthed = true): Promise<AdbExecutor> {
     pushFile: vi.fn().mockResolvedValue({ exitCode: 0, stdout: '1 file pushed', stderr: '' }),
     pullFile: vi.fn().mockResolvedValue({ exitCode: 0, stdout: '1 file pulled', stderr: '' }),
     isBootCompleted: vi.fn().mockResolvedValue(true),
+    getPublicKey: vi.fn().mockResolvedValue('mock-adb-pub-key'),
+    isAuthorized: vi.fn().mockResolvedValue(true),
     spawnLogcat: vi.fn().mockReturnValue({} as ChildProcess),
   };
 }
@@ -135,6 +138,8 @@ describe('Redroid Boot Args & Stealth Prop Injection', () => {
     expect(args).toContain('ro.kernel.qemu=0');
     expect(args).toContain('ro.boot.verifiedbootstate=green');
     expect(args).toContain('ro.serialno=R5CX1234ABCD');
+    expect(args).toContain('ro.hardware.hwcomposer=redroid');
+    expect(args.some((a) => a.startsWith('ro.boot.hardware='))).toBe(false);
     expect(args).toContain('persist.custom.flag=enabled');
   });
 });

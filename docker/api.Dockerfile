@@ -37,6 +37,7 @@ COPY --from=builder /app/apps/api/dist apps/api/dist
 ENV NODE_ENV=production
 ENV API_PORT=13000
 ENV DATA_DIR=/data
+ENV HOME=/data
 
 EXPOSE 13000
 

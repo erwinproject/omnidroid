@@ -15,8 +15,10 @@ if [[ "$EUID" -ne 0 ]]; then
   exit 1
 fi
 
-echo "[1/4] Checking kernel modules (binder_linux)..."
-if ! modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
+echo "[1/4] Checking kernel modules (binder_linux & netfilter)..."
+if grep -q binder /proc/filesystems; then
+  echo "  -> binderfs already active in kernel."
+elif ! modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
   echo "  -> binder_linux not loaded yet. Trying linux-modules-extra-$(uname -r) (Ubuntu only)..."
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
@@ -28,9 +30,32 @@ if ! modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
   fi
 fi
 
-# Persist module across reboots
+IPTABLES_MODULES=(
+  ip_tables
+  iptable_filter
+  iptable_nat
+  iptable_mangle
+  ip6_tables
+  ip6table_filter
+  ip6table_nat
+  ip6table_mangle
+)
+
+for mod in "${IPTABLES_MODULES[@]}"; do
+  modprobe "$mod" 2>/dev/null || true
+done
+
+# Persist modules across reboots
 cat <<EOF > /etc/modules-load.d/redroid.conf
 binder_linux
+ip_tables
+iptable_filter
+iptable_nat
+iptable_mangle
+ip6_tables
+ip6table_filter
+ip6table_nat
+ip6table_mangle
 EOF
 
 cat <<EOF > /etc/modprobe.d/redroid.conf
@@ -41,8 +66,16 @@ echo "[2/4] Verifying binder support..."
 if grep -q binder /proc/filesystems; then
   echo "  -> binderfs is ACTIVE."
 elif [[ -e /dev/binder && -e /dev/hwbinder && -e /dev/vndbinder ]]; then
-  # Kernels built without CONFIG_ANDROID_BINDERFS (e.g. Debian) expose misc devices instead.
-  echo "  -> binder devices ACTIVE (/dev/binder, /dev/hwbinder, /dev/vndbinder)."
+  # Kernels built without CONFIG_ANDROID_BINDERFS (e.g. Debian) expose misc devices instead,
+  # defaulting to 0600 root:root; non-root Android services require 0666.
+  cat <<'EOF' > /etc/udev/rules.d/99-redroid-binder.rules
+KERNEL=="binder|hwbinder|vndbinder", MODE="0666"
+EOF
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules && udevadm trigger || true
+  fi
+  chmod 666 /dev/binder /dev/hwbinder /dev/vndbinder
+  echo "  -> binder devices ACTIVE (/dev/binder, /dev/hwbinder, /dev/vndbinder, mode 0666)."
 else
   echo "[ERROR] Neither binderfs nor /dev/{binder,hwbinder,vndbinder} found after modprobe."
   exit 1

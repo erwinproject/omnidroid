@@ -51,7 +51,8 @@ export function buildRedroidBootArgs(instance: {
   props['ro.build.tags'] = profile.buildTags;
   props['ro.build.version.security_patch'] = profile.securityPatch;
   props['ro.hardware'] = profile.hardware;
-  props['ro.boot.hardware'] = profile.hardware;
+  // Redroid only ships hwcomposer.redroid.so and gpu_config.sh does not set ro.hardware.hwcomposer
+  props['ro.hardware.hwcomposer'] = 'redroid';
   props['ro.product.board'] = profile.board;
   props['ro.board.platform'] = profile.platform;
 
@@ -201,6 +202,55 @@ export class RedroidDockerManager {
   async restartContainer(containerId: string): Promise<void> {
     const container = this.docker.getContainer(containerId);
     await container.restart({ t: 10 });
+  }
+
+  async authorizeAdbKey(containerId: string, publicKey: string, forceRestartAdbd = false): Promise<boolean> {
+    const sanitizedKey = publicKey.split(/\r?\n/)[0]?.replace(/['\r\n]/g, '').trim() ?? '';
+    if (!sanitizedKey) return false;
+
+    const restartLines = forceRestartAdbd
+      ? ['  setprop ctl.restart adbd 2>/dev/null || true', '  echo "RESTARTED"']
+      : [];
+
+    const script = [
+      'if [ ! -d /data/misc ]; then echo "DEFERRED"; exit 0; fi',
+      'mkdir -p /data/misc/adb && chown 1000:2000 /data/misc/adb && chmod 0750 /data/misc/adb && touch /data/misc/adb/adb_keys',
+      `if grep -qxF '${sanitizedKey}' /data/misc/adb/adb_keys; then`,
+      '  chown 1000:2000 /data/misc/adb/adb_keys && chmod 0640 /data/misc/adb/adb_keys',
+      '  echo "PRESENT"',
+      ...restartLines,
+      'else',
+      `  printf '%s\\n' '${sanitizedKey}' >> /data/misc/adb/adb_keys && chown 1000:2000 /data/misc/adb/adb_keys && chmod 0640 /data/misc/adb/adb_keys && (setprop ctl.restart adbd 2>/dev/null || true)`,
+      '  echo "ADDED"',
+      'fi',
+    ].join('\n');
+
+    try {
+      const container = this.docker.getContainer(containerId);
+      const exec = await container.exec({
+        Cmd: ['sh', '-c', script],
+        AttachStdout: true,
+        AttachStderr: true,
+        User: '0',
+      });
+      const stream = await exec.start({ Detach: false, Tty: false });
+      const output = await new Promise<string>((resolve) => {
+        const chunks: Buffer[] = [];
+        const timer = setTimeout(() => resolve(Buffer.concat(chunks).toString('utf8')), 8000);
+        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+        stream.on('end', () => {
+          clearTimeout(timer);
+          resolve(Buffer.concat(chunks).toString('utf8'));
+        });
+        stream.on('error', () => {
+          clearTimeout(timer);
+          resolve(Buffer.concat(chunks).toString('utf8'));
+        });
+      });
+      return output.includes('ADDED') || output.includes('RESTARTED');
+    } catch {
+      return false;
+    }
   }
 
   async removeContainer(containerId: string | null, volumeName?: string, removeVolume = false): Promise<void> {

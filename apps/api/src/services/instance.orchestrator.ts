@@ -107,15 +107,34 @@ export class InstanceOrchestrator {
     }
   }
 
+  private async ensureAdbAuthorized(instance: InstanceRecord, forceRestartAdbd = false): Promise<boolean> {
+    if (!instance.containerId || !this.adb.getPublicKey || !this.docker.authorizeAdbKey) {
+      return false;
+    }
+    const pubKey = await this.adb.getPublicKey();
+    if (!pubKey) return false;
+    const restarted = await this.docker.authorizeAdbKey(instance.containerId, pubKey, forceRestartAdbd);
+    if (restarted) {
+      await this.adb.disconnect(instance.adbTarget).catch(() => undefined);
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    return restarted;
+  }
+
   private schedulePostBootSetup(instance: InstanceRecord): void {
     // Non-blocking boot watcher: connects ADB & applies post-boot stealth hardening
     void (async () => {
-      for (let attempt = 0; attempt < 45; attempt++) {
+      for (let attempt = 0; attempt < 90; attempt++) {
         await new Promise((r) => setTimeout(r, 2000));
         const current = this.store.getInstance(instance.id);
         if (!current || current.status === 'stopped') return;
+        await this.ensureAdbAuthorized(instance).catch(() => false);
         const connected = await this.adb.connect(instance.adbTarget);
         if (!connected) continue;
+        if (this.adb.isAuthorized && !(await this.adb.isAuthorized(instance.adbTarget))) {
+          await this.ensureAdbAuthorized(instance, true).catch(() => false);
+          continue;
+        }
         const booted = await this.adb.isBootCompleted(instance.adbTarget);
         if (booted) {
           if (instance.stealthMode) {
@@ -169,10 +188,19 @@ export class InstanceOrchestrator {
     let bootCompleted = false;
 
     if (stats.running) {
-      adbConnected = await this.adb.connect(inst.adbTarget);
+      await this.ensureAdbAuthorized(inst).catch(() => false);
+      let connected = await this.adb.connect(inst.adbTarget);
+      if (connected && this.adb.isAuthorized && !(await this.adb.isAuthorized(inst.adbTarget))) {
+        await this.ensureAdbAuthorized(inst, true).catch(() => false);
+        connected = await this.adb.connect(inst.adbTarget);
+      }
+      adbConnected = connected && (this.adb.isAuthorized ? await this.adb.isAuthorized(inst.adbTarget) : true);
       if (adbConnected) {
         bootCompleted = await this.adb.isBootCompleted(inst.adbTarget);
         if (bootCompleted && inst.status !== 'running') {
+          if (inst.stealthMode) {
+            await this.stealth.applyPostBootHardening(inst).catch(() => undefined);
+          }
           this.store.updateInstanceStatus(inst.id, 'running');
         }
       }
