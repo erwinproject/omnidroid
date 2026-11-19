@@ -329,12 +329,18 @@ export const LiveScreenCanvas: React.FC<Props> = ({
               {!hasFrame && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[var(--bg-terminal)] p-4 text-center text-[var(--ink-terminal)]">
                   <div className="text-sm font-bold">
-                    {streamStatus === 'connecting' ? 'Connecting video stream...' : 'Stream disconnected'}
+                    {streamStatus === 'connecting'
+                      ? 'Connecting video stream...'
+                      : streamStatus === 'live'
+                        ? 'Awaiting first video frame...'
+                        : 'Stream disconnected'}
                   </div>
-                  <p className="max-w-[22ch] text-[13px] text-[#C6C6BD]">
+                  <p className="max-w-[24ch] text-[13px] text-[#C6C6BD]">
                     {instance.status === 'booting'
                       ? 'Android SurfaceFlinger is booting. Video starts automatically when ready.'
-                      : 'Reconnect WebSocket stream to resume live frames.'}
+                      : streamStatus === 'offline'
+                        ? 'Reconnect WebSocket stream to resume live frames.'
+                        : 'Live frames will render as soon as the next screen capture arrives.'}
                   </p>
                   {streamStatus === 'offline' && (
                     <button
