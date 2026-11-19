@@ -66,17 +66,20 @@ export function registerFileRoutes(app: FastifyInstance, ctx: AppContext): void 
     const filename = path.basename(remotePath);
     const tmpFile = path.join(tmpDir, `${crypto.randomBytes(6).toString('hex')}_${filename}`);
 
-    const res = await ctx.adb.pullFile(inst.adbTarget, remotePath, tmpFile);
-    if (res.exitCode !== 0 || !fs.existsSync(tmpFile)) {
-      return reply.code(404).send({ error: res.stderr || 'File not found on device' });
-    }
+    try {
+      const res = await ctx.adb.pullFile(inst.adbTarget, remotePath, tmpFile);
+      if (res.exitCode !== 0 || !fs.existsSync(tmpFile)) {
+        return reply.code(404).send({ error: res.stderr || 'File not found on device' });
+      }
 
-    const buf = fs.readFileSync(tmpFile);
-    fs.unlinkSync(tmpFile);
-    return reply
-      .header('Content-Disposition', `attachment; filename="${filename}"`)
-      .type('application/octet-stream')
-      .send(buf);
+      const buf = fs.readFileSync(tmpFile);
+      return reply
+        .header('Content-Disposition', `attachment; filename="${filename}"`)
+        .type('application/octet-stream')
+        .send(buf);
+    } finally {
+      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    }
   });
 
   app.delete('/api/v1/instances/:id/files', { schema: { tags: ['Files'], summary: 'Delete a file or directory on the Android instance' } }, async (req, reply) => {

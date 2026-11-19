@@ -1,21 +1,8 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
-import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import sharp from 'sharp';
 import { ScreenshotQuerySchema } from '@droidforge/shared';
 import type { AppContext } from '../context.js';
-
-interface RecordingJob {
-  jobId: string;
-  instanceId: string;
-  remotePath: string;
-  localPath: string;
-  startedAt: string;
-  active: boolean;
-}
-
-const activeRecordings = new Map<string, RecordingJob>();
 
 export function registerScreenRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get('/api/v1/instances/:id/screen/info', { schema: { tags: ['Screen'], summary: 'Get screen resolution, density, rotation, and wake state' } }, async (req) => {
@@ -77,23 +64,10 @@ export function registerScreenRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.post('/api/v1/instances/:id/screen/record/start', { schema: { tags: ['Screen'], summary: 'Start MP4 screen recording on the instance' } }, async (req) => {
     const { id } = req.params as { id: string };
     const inst = ctx.orchestrator.requireInstance(id);
-    const jobId = `rec_${crypto.randomBytes(4).toString('hex')}`;
-    const remotePath = `/sdcard/${jobId}.mp4`;
-    const localPath = path.resolve(ctx.env.DATA_DIR, 'recordings', `${jobId}.mp4`);
+    const job = ctx.recordings.createJob(inst.id);
 
-    fs.mkdirSync(path.dirname(localPath), { recursive: true });
-    await ctx.adb.shell(inst.adbTarget, `nohup screenrecord --time-limit 180 ${remotePath} >/dev/null 2>&1 &`);
-
-    const job: RecordingJob = {
-      jobId,
-      instanceId: inst.id,
-      remotePath,
-      localPath,
-      startedAt: new Date().toISOString(),
-      active: true,
-    };
-    activeRecordings.set(jobId, job);
-    return { jobId, startedAt: job.startedAt };
+    await ctx.adb.shell(inst.adbTarget, `nohup screenrecord --time-limit 180 ${job.remotePath} >/dev/null 2>&1 &`);
+    return { jobId: job.jobId, startedAt: job.startedAt };
   });
 
   app.post('/api/v1/instances/:id/screen/record/stop', { schema: { tags: ['Screen'], summary: 'Stop active screen recording and pull MP4' } }, async (req, reply) => {
@@ -101,17 +75,14 @@ export function registerScreenRoutes(app: FastifyInstance, ctx: AppContext): voi
     const inst = ctx.orchestrator.requireInstance(id);
     const body = (req.body ?? {}) as { jobId?: string };
 
-    const job = body.jobId
-      ? activeRecordings.get(body.jobId)
-      : [...activeRecordings.values()].find((j) => j.instanceId === inst.id && j.active);
-
+    const job = ctx.recordings.findActiveJob(inst.id, body.jobId);
     if (!job) return reply.code(404).send({ error: 'No active recording job found' });
 
     await ctx.adb.shell(inst.adbTarget, 'pkill -SIGINT screenrecord || true');
     await new Promise((r) => setTimeout(r, 800));
     await ctx.adb.pullFile(inst.adbTarget, job.remotePath, job.localPath);
     await ctx.adb.shell(inst.adbTarget, `rm -f ${job.remotePath}`);
-    job.active = false;
+    ctx.recordings.markStopped(job.jobId);
 
     return {
       jobId: job.jobId,
@@ -120,9 +91,9 @@ export function registerScreenRoutes(app: FastifyInstance, ctx: AppContext): voi
   });
 
   app.get('/api/v1/instances/:id/screen/record/:jobId', { schema: { tags: ['Screen'], summary: 'Download recorded MP4 video' } }, async (req, reply) => {
-    const { jobId } = req.params as { id: string; jobId: string };
-    const job = activeRecordings.get(jobId);
-    if (!job || !fs.existsSync(job.localPath)) {
+    const { id, jobId } = req.params as { id: string; jobId: string };
+    const job = ctx.recordings.getJob(jobId);
+    if (!job || job.instanceId !== id || !fs.existsSync(job.localPath)) {
       return reply.code(404).send({ error: 'Recording file not found' });
     }
     return reply.type('video/mp4').send(fs.createReadStream(job.localPath));

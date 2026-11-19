@@ -11,6 +11,52 @@ export interface ContainerStatsResult {
   memoryLimitMb: number | null;
 }
 
+export interface DockerContainerSummary {
+  id: string;
+  names: string[];
+  image: string;
+  imageId: string;
+  state: string;
+  status: string;
+  labels: Record<string, string>;
+  mounts: Array<{ type: string; name?: string; source?: string; destination?: string }>;
+  sizeRw: number;
+}
+
+export interface DockerVolumeSummary {
+  name: string;
+  driver: string;
+  mountpoint: string;
+  labels: Record<string, string>;
+  sizeBytes: number;
+  refCount: number | null;
+}
+
+export interface DockerImageSummary {
+  id: string;
+  repoTags: string[];
+  sizeBytes: number;
+  dangling: boolean;
+  containers: number;
+}
+
+interface DockerDfResult {
+  Volumes?: Array<{
+    Name?: string;
+    UsageData?: { Size?: number; RefCount?: number } | null;
+  }>;
+  BuildCache?: Array<{
+    InUse?: boolean;
+    Size?: number;
+  }>;
+}
+
+function isDockerNotFound(err: unknown): boolean {
+  const e = err as { statusCode?: number; message?: string };
+  if (e?.statusCode === 404) return true;
+  return typeof e?.message === 'string' && /no such/i.test(e.message);
+}
+
 export function buildRedroidBootArgs(instance: {
   width: number;
   height: number;
@@ -175,9 +221,28 @@ export class RedroidDockerManager {
     });
   }
 
+  async ensureManagedVolume(volumeName: string, instanceId?: string, instanceName?: string): Promise<void> {
+    try {
+      await this.docker.getVolume(volumeName).inspect();
+      return;
+    } catch {
+      // Create volume with droidforge labels if missing
+    }
+    const labels: Record<string, string> = {
+      'droidforge.managed': 'true',
+      ...(instanceId ? { 'droidforge.instance_id': instanceId } : {}),
+      ...(instanceName ? { 'droidforge.instance_name': instanceName } : {}),
+    };
+    await this.docker.createVolume({
+      Name: volumeName,
+      Labels: labels,
+    });
+  }
+
   async createContainer(instance: InstanceRecord): Promise<string> {
     await this.ensureNetwork();
     await this.ensureImage(instance.image);
+    await this.ensureManagedVolume(instance.volumeName, instance.id, instance.name);
 
     const cmd = buildRedroidBootArgs({
       width: instance.width,
@@ -296,23 +361,171 @@ export class RedroidDockerManager {
     }
   }
 
-  async removeContainer(containerId: string | null, volumeName?: string, removeVolume = false): Promise<void> {
+  async removeContainer(
+    containerId: string | null,
+    volumeName?: string,
+    removeVolume = false,
+    containerName?: string,
+  ): Promise<void> {
+    let removedById = false;
     if (containerId) {
       const container = this.docker.getContainer(containerId);
       try {
-        await container.remove({ force: true });
+        await container.remove({ force: true, v: true });
+        removedById = true;
       } catch {
-        // Ignore if already removed
+        // Fallback to containerName lookup below
+      }
+    }
+
+    if (!removedById && containerName) {
+      try {
+        await this.docker.getContainer(containerName).remove({ force: true, v: true });
+      } catch (err) {
+        if (!isDockerNotFound(err)) {
+          // Ignore already removed / missing container
+        }
       }
     }
 
     if (removeVolume && volumeName) {
       try {
         await this.docker.getVolume(volumeName).remove({ force: true });
-      } catch {
-        // Ignore if volume doesn't exist
+      } catch (err) {
+        if (!isDockerNotFound(err)) {
+          // Best-effort volume removal
+        }
       }
     }
+  }
+
+  async listAllContainers(): Promise<DockerContainerSummary[]> {
+    let raw: Docker.ContainerInfo[];
+    try {
+      raw = await this.docker.listContainers({ all: true, size: true });
+    } catch {
+      raw = await this.docker.listContainers({ all: true });
+    }
+    return raw.map((c) => {
+      const withSize = c as Docker.ContainerInfo & { SizeRw?: number };
+      return {
+        id: c.Id,
+        names: c.Names ?? [],
+        image: c.Image ?? '',
+        imageId: c.ImageID ?? '',
+        state: c.State ?? '',
+        status: c.Status ?? '',
+        labels: c.Labels ?? {},
+        mounts: (c.Mounts ?? []).map((m) => ({
+          type: m.Type,
+          name: m.Name,
+          source: m.Source,
+          destination: m.Destination,
+        })),
+        sizeRw: Math.max(0, withSize.SizeRw ?? 0),
+      };
+    });
+  }
+
+  async listAllVolumes(): Promise<DockerVolumeSummary[]> {
+    const res = await this.docker.listVolumes();
+    const dfUsage = new Map<string, { Size?: number; RefCount?: number }>();
+    try {
+      const df = (await this.docker.df()) as DockerDfResult;
+      for (const vol of df.Volumes ?? []) {
+        if (vol.Name && vol.UsageData) {
+          dfUsage.set(vol.Name, vol.UsageData);
+        }
+      }
+    } catch {
+      // df() is optional/best-effort
+    }
+
+    return (res.Volumes ?? []).map((v) => {
+      const usage = dfUsage.get(v.Name) ?? v.UsageData ?? undefined;
+      return {
+        name: v.Name,
+        driver: v.Driver ?? 'local',
+        mountpoint: v.Mountpoint ?? '',
+        labels: v.Labels ?? {},
+        sizeBytes: Math.max(0, usage?.Size ?? 0),
+        refCount: typeof usage?.RefCount === 'number' ? usage.RefCount : null,
+      };
+    });
+  }
+
+  async getVolumeSize(volumeName: string): Promise<number> {
+    try {
+      const df = (await this.docker.df()) as DockerDfResult;
+      const found = (df.Volumes ?? []).find((v) => v.Name === volumeName);
+      return Math.max(0, found?.UsageData?.Size ?? 0);
+    } catch {
+      return 0;
+    }
+  }
+
+  async listDockerImages(): Promise<DockerImageSummary[]> {
+    const raw = await this.docker.listImages();
+    return raw.map((img) => {
+      const repoTags = img.RepoTags ?? [];
+      const dangling = repoTags.length === 0 || repoTags.every((t) => t === '<none>:<none>');
+      return {
+        id: img.Id,
+        repoTags,
+        sizeBytes: Math.max(0, img.Size ?? 0),
+        dangling,
+        containers: typeof img.Containers === 'number' ? img.Containers : 0,
+      };
+    });
+  }
+
+  async getBuildCacheUsageBytes(): Promise<number> {
+    try {
+      const df = (await this.docker.df()) as DockerDfResult;
+      let total = 0;
+      for (const entry of df.BuildCache ?? []) {
+        if (!entry.InUse && typeof entry.Size === 'number' && entry.Size > 0) {
+          total += entry.Size;
+        }
+      }
+      return total;
+    } catch {
+      return 0;
+    }
+  }
+
+  async removeVolume(volumeName: string, force = false): Promise<void> {
+    try {
+      await this.docker.getVolume(volumeName).remove({ force });
+    } catch (err) {
+      if (!isDockerNotFound(err)) throw err;
+    }
+  }
+
+  async removeImage(imageId: string, force = false): Promise<void> {
+    try {
+      await this.docker.getImage(imageId).remove({ force });
+    } catch (err) {
+      if (!isDockerNotFound(err)) throw err;
+    }
+  }
+
+  async pruneDanglingImages(): Promise<{ imagesDeleted: string[]; spaceReclaimed: number }> {
+    const res = await this.docker.pruneImages({ filters: { dangling: ['true'] } });
+    const imagesDeleted = (res.ImagesDeleted ?? [])
+      .map((item) => item.Deleted || item.Untagged)
+      .filter((val): val is string => Boolean(val));
+    return {
+      imagesDeleted,
+      spaceReclaimed: Math.max(0, res.SpaceReclaimed ?? 0),
+    };
+  }
+
+  async pruneBuildCache(): Promise<{ spaceReclaimed: number }> {
+    const res = await this.docker.pruneBuilder();
+    return {
+      spaceReclaimed: Math.max(0, res.SpaceReclaimed ?? 0),
+    };
   }
 
   async getContainerStats(containerId: string | null): Promise<ContainerStatsResult> {
@@ -348,9 +561,14 @@ export class RedroidDockerManager {
 
   async cloneVolume(sourceVolume: string, targetVolume: string): Promise<void> {
     await this.ensureImage('alpine:3.20');
+    await this.ensureManagedVolume(targetVolume);
     const helper = await this.docker.createContainer({
       Image: 'alpine:3.20',
       Cmd: ['sh', '-c', 'cp -a /from/. /to/'],
+      Labels: {
+        'droidforge.managed': 'true',
+        'droidforge.role': 'helper',
+      },
       HostConfig: {
         Binds: [`${sourceVolume}:/from:ro`, `${targetVolume}:/to`],
         AutoRemove: true,
@@ -369,6 +587,10 @@ export class RedroidDockerManager {
     const helper = await this.docker.createContainer({
       Image: 'alpine:3.20',
       Cmd: ['sh', '-c', `tar -czf /backup/${file} -C /data .`],
+      Labels: {
+        'droidforge.managed': 'true',
+        'droidforge.role': 'helper',
+      },
       HostConfig: {
         Binds: [`${volumeName}:/data:ro`, `${dir}:/backup`],
         AutoRemove: true,
@@ -388,6 +610,10 @@ export class RedroidDockerManager {
     const helper = await this.docker.createContainer({
       Image: 'alpine:3.20',
       Cmd: ['sh', '-c', `rm -rf /data/* && tar -xzf /backup/${file} -C /data`],
+      Labels: {
+        'droidforge.managed': 'true',
+        'droidforge.role': 'helper',
+      },
       HostConfig: {
         Binds: [`${volumeName}:/data`, `${dir}:/backup:ro`],
         AutoRemove: true,

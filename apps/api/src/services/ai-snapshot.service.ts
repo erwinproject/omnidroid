@@ -82,6 +82,10 @@ export class AiSnapshotService {
     return this.elementCache.get(instanceId)?.get(elementId);
   }
 
+  clearInstance(instanceId: string): void {
+    this.elementCache.delete(instanceId);
+  }
+
   async captureSnapshot(instance: InstanceRecord): Promise<AiSnapshotResponse> {
     const [pngBuffer, hierarchy] = await Promise.all([
       this.adb.screencapPng(instance.adbTarget),

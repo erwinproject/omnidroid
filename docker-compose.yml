@@ -21,6 +21,8 @@ services:
       PROXY_RELAY_PORT_MAX: ${PROXY_RELAY_PORT_MAX:-24999}
       DATA_DIR: /data
       ADB_BIN: adb
+      AUTO_PRUNE_ON_DELETE: ${AUTO_PRUNE_ON_DELETE:-true}
+      PRUNE_DANGLING_IMAGES_ON_DELETE: ${PRUNE_DANGLING_IMAGES_ON_DELETE:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - api-data:/data

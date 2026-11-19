@@ -227,8 +227,4 @@ export function registerProxyRoutes(app: FastifyInstance, ctx: AppContext): void
     const inst = ctx.orchestrator.requireInstance(id);
     return ctx.proxyRelay.verifyFromAndroid(ctx.adb, inst);
   });
-
-  app.get('/api/v1/system/images', { schema: { tags: ['System'], summary: 'Check available Redroid base and Play Store Docker images' } }, async () => {
-    return ctx.docker.getSystemImages();
-  });
 }

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import {
   formatProxyUrl,
@@ -6,11 +7,14 @@ import {
   parseProxyString,
   type CloneInstanceInput,
   type CreateInstanceInput,
+  type DeleteInstanceResult,
+  type DeleteSnapshotResult,
   type DeviceProfile,
   type InstanceHealth,
   type InstanceProxyState,
   type InstanceRecord,
   type ProxyConfig,
+  type PruneReport,
   type SetInstanceProxyInput,
   type SnapshotRecord,
 } from '@droidforge/shared';
@@ -18,8 +22,12 @@ import type { AppEnv } from '../config/env.js';
 import type { StateStore } from '../db/database.js';
 import type { RedroidDockerManager } from '../docker/redroid-docker.manager.js';
 import type { AdbExecutor } from './adb.service.js';
+import type { AiSnapshotService } from './ai-snapshot.service.js';
 import type { ProxyRelayService } from './proxy-relay.service.js';
+import type { PruneService } from './prune.service.js';
+import type { RecordingService } from './recording.service.js';
 import type { StealthService } from './stealth.service.js';
+import type { StreamService } from './stream.service.js';
 
 export class InstanceOrchestrator {
   constructor(
@@ -29,6 +37,10 @@ export class InstanceOrchestrator {
     private readonly adb: AdbExecutor,
     private readonly stealth: StealthService,
     private readonly proxyRelay: ProxyRelayService,
+    private readonly recordings: RecordingService,
+    private readonly pruneService: PruneService,
+    private readonly stream: StreamService,
+    private readonly aiSnapshot: AiSnapshotService,
   ) {}
 
   private resolveProfile(input: CreateInstanceInput): DeviceProfile {
@@ -166,6 +178,9 @@ export class InstanceOrchestrator {
 
       return record;
     } catch (err) {
+      if (!record.containerId) {
+        await this.docker.removeContainer(null, record.volumeName, true, record.containerName).catch(() => undefined);
+      }
       this.store.updateInstanceStatus(record.id, 'error');
       throw err;
     }
@@ -336,12 +351,116 @@ export class InstanceOrchestrator {
     return updated;
   }
 
-  async remove(id: string, removeVolume = false): Promise<void> {
+  private removeSnapshotFilesForInstance(instanceId: string): {
+    removedFiles: number;
+    reclaimedBytes: number;
+  } {
+    let removedFiles = 0;
+    let reclaimedBytes = 0;
+    const deletedPaths = new Set<string>();
+
+    for (const snap of this.store.listSnapshots(instanceId)) {
+      const resolved = path.resolve(snap.filePath);
+      if (fs.existsSync(resolved)) {
+        try {
+          const stat = fs.statSync(resolved);
+          if (stat.isFile()) {
+            fs.unlinkSync(resolved);
+            removedFiles += 1;
+            reclaimedBytes += stat.size;
+            deletedPaths.add(resolved);
+          }
+        } catch {
+          // Ignore already removed snapshot file
+        }
+      }
+    }
+
+    const snapshotsDir = path.resolve(this.env.DATA_DIR, 'snapshots');
+    if (fs.existsSync(snapshotsDir)) {
+      try {
+        for (const entry of fs.readdirSync(snapshotsDir)) {
+          if (!entry.startsWith(`${instanceId}_`)) continue;
+          const resolved = path.resolve(snapshotsDir, entry);
+          if (deletedPaths.has(resolved)) continue;
+          try {
+            const stat = fs.statSync(resolved);
+            if (stat.isFile()) {
+              fs.unlinkSync(resolved);
+              removedFiles += 1;
+              reclaimedBytes += stat.size;
+              deletedPaths.add(resolved);
+            }
+          } catch {
+            // Ignore transient unlink errors
+          }
+        }
+      } catch {
+        // Ignore directory read errors
+      }
+    }
+
+    return { removedFiles, reclaimedBytes };
+  }
+
+  async remove(
+    id: string,
+    removeVolumeOrOptions: boolean | { removeVolume?: boolean; prune?: boolean } = true,
+  ): Promise<DeleteInstanceResult> {
     const inst = this.requireInstance(id);
+    const removeVolume =
+      typeof removeVolumeOrOptions === 'boolean'
+        ? removeVolumeOrOptions
+        : (removeVolumeOrOptions.removeVolume ?? true);
+    const shouldPrune =
+      typeof removeVolumeOrOptions === 'boolean'
+        ? this.env.AUTO_PRUNE_ON_DELETE
+        : (removeVolumeOrOptions.prune ?? this.env.AUTO_PRUNE_ON_DELETE);
+
+    this.stream.stopInstance(id);
+    this.aiSnapshot.clearInstance(id);
     await this.proxyRelay.stopRelay(id);
     await this.adb.disconnect(inst.adbTarget).catch(() => undefined);
-    await this.docker.removeContainer(inst.containerId, inst.volumeName, removeVolume);
+
+    const volumeSize = removeVolume ? await this.docker.getVolumeSize(inst.volumeName).catch(() => 0) : 0;
+    await this.docker.removeContainer(inst.containerId, inst.volumeName, removeVolume, inst.containerName);
+
+    const snapRemoval = this.removeSnapshotFilesForInstance(id);
+    const recRemoval = this.recordings.removeForInstance(id);
+
     this.store.deleteInstance(id);
+
+    let pruneReport: PruneReport | null = null;
+    if (shouldPrune) {
+      pruneReport = await this.pruneService.prune(
+        {
+          dryRun: false,
+          removeDanglingImages: this.env.PRUNE_DANGLING_IMAGES_ON_DELETE,
+          removeUnusedRedroidImages: false,
+          removeBuildCache: false,
+          minTempFileAgeMs: 300_000,
+        },
+        { excludeVolumes: removeVolume ? [] : [inst.volumeName] },
+      );
+    } else {
+      this.store.checkpoint();
+    }
+
+    const reclaimedBytes =
+      volumeSize +
+      snapRemoval.reclaimedBytes +
+      recRemoval.reclaimedBytes +
+      (pruneReport?.reclaimedBytes ?? 0);
+
+    return {
+      deleted: true,
+      instanceId: id,
+      removedVolume: removeVolume,
+      removedSnapshotFiles: snapRemoval.removedFiles,
+      removedRecordingFiles: recRemoval.removedFiles,
+      reclaimedBytes,
+      prune: pruneReport,
+    };
   }
 
   async health(id: string): Promise<InstanceHealth> {
@@ -386,7 +505,7 @@ export class InstanceOrchestrator {
 
     const newId = crypto.randomBytes(4).toString('hex');
     const newVolume = `redroid-data-${newId}`;
-    await this.docker.cloneVolume(source.volumeName, newVolume);
+    const containerName = `redroid-${newId}`;
 
     const profile: DeviceProfile = { ...source.profile };
     if (input.randomizeIdentity) {
@@ -396,7 +515,6 @@ export class InstanceOrchestrator {
       profile.macAddress = identity.macAddress;
     }
 
-    const containerName = `redroid-${newId}`;
     const hostAdbPort = input.exposeAdbPort
       ? this.store.allocateUniqueAdbPort(this.env.ADB_PORT_MIN, this.env.ADB_PORT_MAX)
       : null;
@@ -417,15 +535,23 @@ export class InstanceOrchestrator {
       updatedAt: now,
     };
 
-    this.store.saveInstance(cloned);
-    const containerId = await this.docker.createContainer(cloned);
-    cloned.containerId = containerId;
-    cloned.status = 'booting';
-    this.store.saveInstance(cloned);
-    await this.docker.startContainer(containerId);
-    this.schedulePostBootSetup(cloned);
-
-    return cloned;
+    try {
+      await this.docker.cloneVolume(source.volumeName, newVolume);
+      this.store.saveInstance(cloned);
+      const containerId = await this.docker.createContainer(cloned);
+      cloned.containerId = containerId;
+      cloned.status = 'booting';
+      this.store.saveInstance(cloned);
+      await this.docker.startContainer(containerId);
+      this.schedulePostBootSetup(cloned);
+      return cloned;
+    } catch (err) {
+      await this.docker
+        .removeContainer(cloned.containerId, newVolume, true, containerName)
+        .catch(() => undefined);
+      this.store.deleteInstance(newId);
+      throw err;
+    }
   }
 
   async createSnapshot(id: string, name?: string): Promise<SnapshotRecord> {
@@ -466,6 +592,39 @@ export class InstanceOrchestrator {
       await this.docker.startContainer(inst.containerId);
       this.schedulePostBootSetup(inst);
     }
+  }
+
+  async deleteSnapshot(id: string, snapId: string): Promise<DeleteSnapshotResult> {
+    this.requireInstance(id);
+    const snap = this.store.getSnapshot(snapId);
+    if (!snap || snap.instanceId !== id) {
+      const err = new Error(`Snapshot ${snapId} not found for instance ${id}`) as Error & { statusCode?: number };
+      err.statusCode = 404;
+      throw err;
+    }
+
+    let reclaimedBytes = 0;
+    const resolved = path.resolve(snap.filePath);
+    if (fs.existsSync(resolved)) {
+      try {
+        const stat = fs.statSync(resolved);
+        if (stat.isFile()) {
+          fs.unlinkSync(resolved);
+          reclaimedBytes = stat.size;
+        }
+      } catch {
+        // Ignore already removed snapshot file
+      }
+    }
+
+    this.store.deleteSnapshot(snapId);
+    this.store.checkpoint();
+
+    return {
+      deleted: true,
+      snapshotId: snapId,
+      reclaimedBytes,
+    };
   }
 
   requireInstance(id: string): InstanceRecord {

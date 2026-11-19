@@ -1,12 +1,21 @@
 import type { ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import sharp from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
 import { BUILTIN_DEVICE_PROFILES, parseProxyString } from '@droidforge/shared';
 import { buildApp } from '../app.js';
 import { loadEnv } from '../config/env.js';
-import { buildRedroidBootArgs, type RedroidDockerManager } from '../docker/redroid-docker.manager.js';
+import {
+  buildRedroidBootArgs,
+  type DockerContainerSummary,
+  type DockerImageSummary,
+  type DockerVolumeSummary,
+  type RedroidDockerManager,
+} from '../docker/redroid-docker.manager.js';
 import type { AdbExecutor } from '../services/adb.service.js';
 import { extractInteractiveElements } from '../services/ai-snapshot.service.js';
 import { ProxyRelayService } from '../services/proxy-relay.service.js';
@@ -40,6 +49,15 @@ function createMockDocker(): RedroidDockerManager {
     cloneVolume: vi.fn().mockResolvedValue(undefined),
     backupVolumeToTar: vi.fn().mockResolvedValue(4096),
     restoreVolumeFromTar: vi.fn().mockResolvedValue(undefined),
+    listAllContainers: vi.fn().mockResolvedValue([]),
+    listAllVolumes: vi.fn().mockResolvedValue([]),
+    getVolumeSize: vi.fn().mockResolvedValue(0),
+    listDockerImages: vi.fn().mockResolvedValue([]),
+    getBuildCacheUsageBytes: vi.fn().mockResolvedValue(0),
+    removeVolume: vi.fn().mockResolvedValue(undefined),
+    removeImage: vi.fn().mockResolvedValue(undefined),
+    pruneDanglingImages: vi.fn().mockResolvedValue({ imagesDeleted: [], spaceReclaimed: 0 }),
+    pruneBuildCache: vi.fn().mockResolvedValue({ spaceReclaimed: 0 }),
     getSystemImages: vi.fn().mockResolvedValue([
       {
         androidVersion: '13',
@@ -893,6 +911,537 @@ describe('Play Store Boot Flags & Proxy Subsystem', () => {
       expect(clearProxyRes.json().config).toBeNull();
     } finally {
       await app.close();
+    }
+  });
+});
+
+function createStatefulMockDocker(initial?: {
+  containers?: DockerContainerSummary[];
+  volumes?: DockerVolumeSummary[];
+  images?: DockerImageSummary[];
+  buildCacheBytes?: number;
+}) {
+  const containers: DockerContainerSummary[] = [...(initial?.containers ?? [])];
+  const volumes: DockerVolumeSummary[] = [...(initial?.volumes ?? [])];
+  const images: DockerImageSummary[] = [...(initial?.images ?? [])];
+  let buildCacheBytes = initial?.buildCacheBytes ?? 0;
+  let seq = 1;
+
+  const mock = {
+    ensureNetwork: vi.fn().mockResolvedValue(undefined),
+    ensureImage: vi.fn().mockResolvedValue(undefined),
+    ensureManagedVolume: vi.fn().mockImplementation(async (volumeName: string, instanceId?: string) => {
+      if (!volumes.some((v) => v.name === volumeName)) {
+        volumes.push({
+          name: volumeName,
+          driver: 'local',
+          mountpoint: `/var/lib/docker/volumes/${volumeName}/_data`,
+          labels: {
+            'droidforge.managed': 'true',
+            ...(instanceId ? { 'droidforge.instance_id': instanceId } : {}),
+          },
+          sizeBytes: 2048,
+          refCount: 1,
+        });
+      }
+    }),
+    createContainer: vi.fn().mockImplementation(async (instance) => {
+      const id = `mock-container-${seq++}`;
+      await mock.ensureManagedVolume(instance.volumeName, instance.id);
+      containers.push({
+        id,
+        names: [`/${instance.containerName}`],
+        image: instance.image,
+        imageId: `sha256:img-${instance.image}`,
+        state: 'created',
+        status: 'Created',
+        labels: {
+          'droidforge.managed': 'true',
+          'droidforge.instance_id': instance.id,
+          'droidforge.instance_name': instance.name,
+        },
+        mounts: [{ type: 'volume', name: instance.volumeName, destination: '/data' }],
+        sizeRw: 1024,
+      });
+      return id;
+    }),
+    startContainer: vi.fn().mockResolvedValue(undefined),
+    stopContainer: vi.fn().mockResolvedValue(undefined),
+    restartContainer: vi.fn().mockResolvedValue(undefined),
+    authorizeAdbKey: vi.fn().mockResolvedValue(false),
+    removeContainer: vi.fn().mockImplementation(
+      async (containerId: string | null, volumeName?: string, removeVolume = false, containerName?: string) => {
+        const idx = containers.findIndex(
+          (c) =>
+            (containerId && c.id === containerId) ||
+            (containerName && c.names.some((n) => n.replace(/^\/+/, '') === containerName)),
+        );
+        if (idx !== -1) containers.splice(idx, 1);
+        if (removeVolume && volumeName) {
+          const vIdx = volumes.findIndex((v) => v.name === volumeName);
+          if (vIdx !== -1) volumes.splice(vIdx, 1);
+        }
+      },
+    ),
+    getContainerStats: vi.fn().mockResolvedValue({
+      running: false,
+      cpuPercent: 0,
+      memoryUsageMb: 0,
+      memoryLimitMb: null,
+    }),
+    cloneVolume: vi.fn().mockResolvedValue(undefined),
+    backupVolumeToTar: vi.fn().mockImplementation(async (_vol: string, destTarPath: string) => {
+      fs.mkdirSync(path.dirname(destTarPath), { recursive: true });
+      const payload = Buffer.from('mock-tar-gz-snapshot-payload');
+      fs.writeFileSync(destTarPath, payload);
+      return payload.length;
+    }),
+    restoreVolumeFromTar: vi.fn().mockResolvedValue(undefined),
+    listAllContainers: vi.fn().mockImplementation(async () => [...containers]),
+    listAllVolumes: vi.fn().mockImplementation(async () => [...volumes]),
+    getVolumeSize: vi.fn().mockImplementation(async (volumeName: string) => {
+      return volumes.find((v) => v.name === volumeName)?.sizeBytes ?? 0;
+    }),
+    listDockerImages: vi.fn().mockImplementation(async () => [...images]),
+    getBuildCacheUsageBytes: vi.fn().mockImplementation(async () => buildCacheBytes),
+    removeVolume: vi.fn().mockImplementation(async (volumeName: string) => {
+      const idx = volumes.findIndex((v) => v.name === volumeName);
+      if (idx !== -1) volumes.splice(idx, 1);
+    }),
+    removeImage: vi.fn().mockImplementation(async (imageId: string) => {
+      const idx = images.findIndex((img) => img.id === imageId);
+      if (idx !== -1) images.splice(idx, 1);
+    }),
+    pruneDanglingImages: vi.fn().mockImplementation(async () => {
+      const deleted: string[] = [];
+      let spaceReclaimed = 0;
+      for (let i = images.length - 1; i >= 0; i--) {
+        if (images[i].dangling) {
+          deleted.push(images[i].id);
+          spaceReclaimed += images[i].sizeBytes;
+          images.splice(i, 1);
+        }
+      }
+      return { imagesDeleted: deleted, spaceReclaimed };
+    }),
+    pruneBuildCache: vi.fn().mockImplementation(async () => {
+      const reclaimed = buildCacheBytes;
+      buildCacheBytes = 0;
+      return { spaceReclaimed: reclaimed };
+    }),
+    getSystemImages: vi.fn().mockResolvedValue([]),
+  };
+
+  return {
+    docker: mock as unknown as RedroidDockerManager,
+    mock,
+    containers,
+    volumes,
+    images,
+  };
+}
+
+describe('Storage & Container Prune Subsystem', () => {
+  it('auto-prunes container, /data volume, snapshots, recordings, and orphaned artifacts on DELETE instance', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'droidforge-prune-auto-'));
+    const anonVolId = 'a'.repeat(64);
+    const stateful = createStatefulMockDocker({
+      containers: [
+        {
+          id: 'third-party-web',
+          names: ['/droidforge-web'],
+          image: 'nginx:alpine',
+          imageId: 'sha256:nginx',
+          state: 'running',
+          status: 'Up',
+          labels: {},
+          mounts: [],
+          sizeRw: 512,
+        },
+        {
+          id: 'orphan-container-1',
+          names: ['/redroid-deadbeef'],
+          image: 'redroid/redroid:13.0.0-latest',
+          imageId: 'sha256:redroid13',
+          state: 'exited',
+          status: 'Exited',
+          labels: { 'droidforge.managed': 'true', 'droidforge.instance_id': 'deadbeef' },
+          mounts: [{ type: 'volume', name: 'redroid-data-deadbeef', destination: '/data' }],
+          sizeRw: 4000,
+        },
+      ],
+      volumes: [
+        {
+          name: 'droidforge-api-data',
+          driver: 'local',
+          mountpoint: '/var/lib/docker/volumes/droidforge-api-data/_data',
+          labels: {},
+          sizeBytes: 99999,
+          refCount: 1,
+        },
+        {
+          name: 'redroid-data-deadbeef',
+          driver: 'local',
+          mountpoint: '/var/lib/docker/volumes/redroid-data-deadbeef/_data',
+          labels: { 'droidforge.managed': 'true', 'droidforge.instance_id': 'deadbeef' },
+          sizeBytes: 12000,
+          refCount: 1,
+        },
+        {
+          name: anonVolId,
+          driver: 'local',
+          mountpoint: `/var/lib/docker/volumes/${anonVolId}/_data`,
+          labels: {},
+          sizeBytes: 3000,
+          refCount: 0,
+        },
+      ],
+      images: [
+        {
+          id: 'sha256:dangling1',
+          repoTags: [],
+          sizeBytes: 50000,
+          dangling: true,
+          containers: 0,
+        },
+      ],
+    });
+
+    const env = loadEnv({
+      NODE_ENV: 'test',
+      REQUIRE_AUTH: 'false',
+      DATA_DIR: tempDir,
+      AUTO_PRUNE_ON_DELETE: 'true',
+      PRUNE_DANGLING_IMAGES_ON_DELETE: 'true',
+    });
+    const { app } = await buildApp({ env, docker: stateful.docker, adb: await createMockAdb(true) });
+
+    try {
+      const keepRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: { name: 'keep-instance', autoStart: false },
+      });
+      expect(keepRes.statusCode).toBe(201);
+      const keepInst = keepRes.json();
+
+      const delRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: { name: 'delete-instance', autoStart: false },
+      });
+      expect(delRes.statusCode).toBe(201);
+      const delInst = delRes.json();
+
+      // Create snapshots for both instances
+      const keepSnapRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/instances/${keepInst.id}/snapshots`,
+        payload: { name: 'keep-snap' },
+      });
+      expect(keepSnapRes.statusCode).toBe(201);
+      const keepSnap = keepSnapRes.json();
+
+      const delSnapRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/instances/${delInst.id}/snapshots`,
+        payload: { name: 'del-snap' },
+      });
+      expect(delSnapRes.statusCode).toBe(201);
+      const delSnap = delSnapRes.json();
+      expect(fs.existsSync(delSnap.filePath)).toBe(true);
+
+      // Seed recording files for both instances
+      const recDir = path.join(tempDir, 'recordings');
+      fs.mkdirSync(recDir, { recursive: true });
+      const keepRecPath = path.join(recDir, `${keepInst.id}_rec_11111111.mp4`);
+      const delRecPath = path.join(recDir, `${delInst.id}_rec_22222222.mp4`);
+      fs.writeFileSync(keepRecPath, Buffer.alloc(1500, 1));
+      fs.writeFileSync(delRecPath, Buffer.alloc(2500, 2));
+
+      // Seed stale temp file (>10 mins old) & fresh temp file (<1s old)
+      const uploadsDir = path.join(tempDir, 'uploads');
+      fs.mkdirSync(uploadsDir, { recursive: true });
+      const staleUpload = path.join(uploadsDir, 'stale.apk');
+      const freshUpload = path.join(uploadsDir, 'fresh.apk');
+      fs.writeFileSync(staleUpload, Buffer.alloc(7000, 3));
+      fs.writeFileSync(freshUpload, Buffer.alloc(800, 4));
+      const oldTime = new Date(Date.now() - 10 * 60_000);
+      fs.utimesSync(staleUpload, oldTime, oldTime);
+
+      // Delete delete-instance with default behavior (removeVolume=true, prune=true)
+      const deleteResponse = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/instances/${delInst.id}`,
+      });
+      expect(deleteResponse.statusCode).toBe(200);
+      const body = deleteResponse.json();
+      expect(body.deleted).toBe(true);
+      expect(body.removedVolume).toBe(true);
+      expect(body.removedSnapshotFiles).toBe(1);
+      expect(body.removedRecordingFiles).toBe(1);
+      expect(body.reclaimedBytes).toBeGreaterThan(70000);
+      expect(body.prune).not.toBeNull();
+      expect(body.prune.counts.orphanedContainers).toBe(1);
+      expect(body.prune.counts.orphanedVolumes).toBe(1);
+      expect(body.prune.counts.anonymousVolumes).toBe(1);
+      expect(body.prune.counts.tempFiles).toBe(1);
+      expect(body.prune.counts.danglingImages).toBe(1);
+
+      // Deleted instance artifacts + orphans are gone
+      expect(fs.existsSync(delSnap.filePath)).toBe(false);
+      expect(fs.existsSync(delRecPath)).toBe(false);
+      expect(fs.existsSync(staleUpload)).toBe(false);
+      expect(stateful.containers.some((c) => c.id === 'orphan-container-1')).toBe(false);
+      expect(stateful.volumes.some((v) => v.name === delInst.volumeName)).toBe(false);
+      expect(stateful.volumes.some((v) => v.name === 'redroid-data-deadbeef')).toBe(false);
+      expect(stateful.volumes.some((v) => v.name === anonVolId)).toBe(false);
+      expect(stateful.images.some((img) => img.id === 'sha256:dangling1')).toBe(false);
+
+      // Active instance, protected host volume/container, and fresh upload remain intact
+      expect(fs.existsSync(keepSnap.filePath)).toBe(true);
+      expect(fs.existsSync(keepRecPath)).toBe(true);
+      expect(fs.existsSync(freshUpload)).toBe(true);
+      expect(stateful.containers.some((c) => c.id === 'third-party-web')).toBe(true);
+      expect(stateful.volumes.some((v) => v.name === keepInst.volumeName)).toBe(true);
+      expect(stateful.volumes.some((v) => v.name === 'droidforge-api-data')).toBe(true);
+    } finally {
+      await app.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves volume when removeVolume=false&prune=true and skips prune when prune=false', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'droidforge-prune-flags-'));
+    const stateful = createStatefulMockDocker({
+      volumes: [
+        {
+          name: 'redroid-data-orphan99',
+          driver: 'local',
+          mountpoint: '/var/lib/docker/volumes/redroid-data-orphan99/_data',
+          labels: { 'droidforge.managed': 'true' },
+          sizeBytes: 5000,
+          refCount: 0,
+        },
+      ],
+    });
+    const env = loadEnv({ NODE_ENV: 'test', REQUIRE_AUTH: 'false', DATA_DIR: tempDir });
+    const { app } = await buildApp({ env, docker: stateful.docker, adb: await createMockAdb(true) });
+
+    try {
+      const c1 = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: { name: 'keep-vol-inst', autoStart: false },
+      });
+      const inst1 = c1.json();
+
+      // removeVolume=false & prune=true must NOT delete inst1.volumeName, while still pruning orphan99
+      const d1 = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/instances/${inst1.id}?removeVolume=false&prune=true`,
+      });
+      expect(d1.statusCode).toBe(200);
+      expect(d1.json().removedVolume).toBe(false);
+      expect(stateful.volumes.some((v) => v.name === inst1.volumeName)).toBe(true);
+      expect(stateful.volumes.some((v) => v.name === 'redroid-data-orphan99')).toBe(false);
+
+      // Re-seed an orphan and test prune=false
+      stateful.volumes.push({
+        name: 'redroid-data-orphan88',
+        driver: 'local',
+        mountpoint: '/var/lib/docker/volumes/redroid-data-orphan88/_data',
+        labels: { 'droidforge.managed': 'true' },
+        sizeBytes: 4000,
+        refCount: 0,
+      });
+
+      const c2 = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: { name: 'no-prune-inst', autoStart: false },
+      });
+      const inst2 = c2.json();
+
+      const d2 = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/instances/${inst2.id}?prune=false`,
+      });
+      expect(d2.statusCode).toBe(200);
+      expect(d2.json().removedVolume).toBe(true);
+      expect(d2.json().prune).toBeNull();
+      expect(stateful.volumes.some((v) => v.name === inst2.volumeName)).toBe(false);
+      expect(stateful.volumes.some((v) => v.name === 'redroid-data-orphan88')).toBe(true);
+    } finally {
+      await app.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('supports dry-run preview, selective manual prune, opt-in images/build cache, protected files, and snapshot deletion', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'droidforge-prune-manual-'));
+    const stateful = createStatefulMockDocker({
+      images: [
+        {
+          id: 'sha256:redroid11',
+          repoTags: ['redroid/redroid:11.0.0-latest'],
+          sizeBytes: 800_000,
+          dangling: false,
+          containers: 0,
+        },
+        {
+          id: 'sha256:redroid13',
+          repoTags: ['redroid/redroid:13.0.0-latest'],
+          sizeBytes: 900_000,
+          dangling: false,
+          containers: 1,
+        },
+        {
+          id: 'sha256:dangling2',
+          repoTags: [],
+          sizeBytes: 100_000,
+          dangling: true,
+          containers: 0,
+        },
+      ],
+      buildCacheBytes: 250_000,
+    });
+
+    const env = loadEnv({ NODE_ENV: 'test', REQUIRE_AUTH: 'false', DATA_DIR: tempDir });
+    const { app } = await buildApp({ env, docker: stateful.docker, adb: await createMockAdb(true) });
+
+    try {
+      // Seed protected root DB and ADB key files inside DATA_DIR
+      const dbFile = path.join(tempDir, 'droidforge.db');
+      const androidDir = path.join(tempDir, '.android');
+      fs.mkdirSync(androidDir, { recursive: true });
+      const adbKey = path.join(androidDir, 'adbkey');
+      fs.writeFileSync(dbFile, 'sqlite-bytes');
+      fs.writeFileSync(adbKey, 'private-adb-key');
+
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: { name: 'active-prune-test', androidVersion: '13', autoStart: false },
+      });
+      const inst = created.json();
+
+      // Create snapshot & test DELETE snapshot endpoint
+      const snapRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/instances/${inst.id}/snapshots`,
+        payload: { name: 'snap-to-delete' },
+      });
+      const snap = snapRes.json();
+      expect(fs.existsSync(snap.filePath)).toBe(true);
+
+      const delSnapRes = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/instances/${inst.id}/snapshots/${snap.id}`,
+      });
+      expect(delSnapRes.statusCode).toBe(200);
+      expect(delSnapRes.json().deleted).toBe(true);
+      expect(delSnapRes.json().reclaimedBytes).toBeGreaterThan(0);
+      expect(fs.existsSync(snap.filePath)).toBe(false);
+
+      const listSnapsAfter = await app.inject({
+        method: 'GET',
+        url: `/api/v1/instances/${inst.id}/snapshots`,
+      });
+      expect(listSnapsAfter.json()).toHaveLength(0);
+
+      // Start an active recording and write bytes to its local file path
+      const recStartRes = await app.inject({
+        method: 'POST',
+        url: `/api/v1/instances/${inst.id}/screen/record/start`,
+      });
+      const recJob = recStartRes.json();
+      const activeRecPath = path.join(tempDir, 'recordings', `${inst.id}_${recJob.jobId}.mp4`);
+      fs.writeFileSync(activeRecPath, Buffer.alloc(1200, 5));
+
+      // Seed orphaned snapshot, orphaned recording, and stale download
+      const snapDir = path.join(tempDir, 'snapshots');
+      const recDir = path.join(tempDir, 'recordings');
+      const dlDir = path.join(tempDir, 'downloads');
+      fs.mkdirSync(snapDir, { recursive: true });
+      fs.mkdirSync(dlDir, { recursive: true });
+
+      const orphanSnapPath = path.join(snapDir, 'dead1234_snap_abcd.tar.gz');
+      const orphanRecPath = path.join(recDir, 'dead1234_rec_abcd.mp4');
+      const staleDlPath = path.join(dlDir, 'old-pull.bin');
+      const freshDlPath = path.join(dlDir, 'active-pull.bin');
+      fs.writeFileSync(orphanSnapPath, Buffer.alloc(3000, 6));
+      fs.writeFileSync(orphanRecPath, Buffer.alloc(4000, 7));
+      fs.writeFileSync(staleDlPath, Buffer.alloc(5000, 8));
+      fs.writeFileSync(freshDlPath, Buffer.alloc(900, 9));
+      const oldTime = new Date(Date.now() - 120_000);
+      fs.utimesSync(staleDlPath, oldTime, oldTime);
+
+      // 1. Dry-run preview (without unused images / build cache)
+      const previewRes = await app.inject({ method: 'GET', url: '/api/v1/system/prune/preview' });
+      expect(previewRes.statusCode).toBe(200);
+      const preview = previewRes.json();
+      expect(preview.dryRun).toBe(true);
+      expect(preview.counts.orphanedSnapshots).toBe(1);
+      expect(preview.counts.orphanedRecordings).toBe(1);
+      expect(preview.counts.tempFiles).toBe(1);
+      expect(preview.counts.danglingImages).toBe(1);
+      expect(preview.counts.unusedImages).toBe(0);
+      expect(preview.counts.buildCacheBytes).toBe(0);
+      expect(preview.reclaimedBytes).toBe(3000 + 4000 + 5000 + 100_000);
+
+      // Nothing deleted during dry-run preview
+      expect(fs.existsSync(orphanSnapPath)).toBe(true);
+      expect(fs.existsSync(orphanRecPath)).toBe(true);
+      expect(fs.existsSync(staleDlPath)).toBe(true);
+      expect(stateful.images.some((i) => i.id === 'sha256:dangling2')).toBe(true);
+
+      // 2. Preview including unused images & build cache
+      const fullPreviewRes = await app.inject({
+        method: 'GET',
+        url: '/api/v1/system/prune/preview?includeUnusedImages=true&includeBuildCache=true',
+      });
+      const fullPreview = fullPreviewRes.json();
+      expect(fullPreview.counts.unusedImages).toBe(1);
+      expect(fullPreview.counts.buildCacheBytes).toBe(250_000);
+
+      // 3. Execute manual prune with opt-in unused Redroid images + build cache
+      const pruneRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/system/prune',
+        payload: {
+          dryRun: false,
+          removeUnusedRedroidImages: true,
+          removeBuildCache: true,
+        },
+      });
+      expect(pruneRes.statusCode).toBe(200);
+      const pruneBody = pruneRes.json();
+      expect(pruneBody.dryRun).toBe(false);
+      expect(pruneBody.counts.orphanedSnapshots).toBe(1);
+      expect(pruneBody.counts.orphanedRecordings).toBe(1);
+      expect(pruneBody.counts.tempFiles).toBe(1);
+      expect(pruneBody.counts.danglingImages).toBe(1);
+      expect(pruneBody.counts.unusedImages).toBe(1);
+      expect(pruneBody.counts.buildCacheBytes).toBe(250_000);
+      expect(pruneBody.errors).toEqual([]);
+
+      // Verify orphaned files + unused image + build cache removed
+      expect(fs.existsSync(orphanSnapPath)).toBe(false);
+      expect(fs.existsSync(orphanRecPath)).toBe(false);
+      expect(fs.existsSync(staleDlPath)).toBe(false);
+      expect(stateful.images.some((i) => i.id === 'sha256:dangling2')).toBe(false);
+      expect(stateful.images.some((i) => i.id === 'sha256:redroid11')).toBe(false);
+
+      // Verify active image, active recording, fresh temp file, DB, and ADB key remain untouched
+      expect(stateful.images.some((i) => i.id === 'sha256:redroid13')).toBe(true);
+      expect(fs.existsSync(activeRecPath)).toBe(true);
+      expect(fs.existsSync(freshDlPath)).toBe(true);
+      expect(fs.existsSync(dbFile)).toBe(true);
+      expect(fs.existsSync(adbKey)).toBe(true);
+    } finally {
+      await app.close();
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

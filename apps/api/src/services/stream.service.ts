@@ -49,6 +49,16 @@ export class StreamService {
     }
   }
 
+  stopInstance(instanceId: string): void {
+    const room = this.rooms.get(instanceId);
+    if (!room) return;
+    if (room.timer) clearInterval(room.timer);
+    for (const ws of room.clients) {
+      ws.close();
+    }
+    this.rooms.delete(instanceId);
+  }
+
   private startLoop(room: StreamRoom, fps: number): void {
     const intervalMs = Math.round(1000 / fps);
     room.timer = setInterval(async () => {

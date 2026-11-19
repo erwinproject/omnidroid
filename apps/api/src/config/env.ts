@@ -24,6 +24,14 @@ const EnvSchema = z.object({
   PROXY_RELAY_PORT_MAX: z.coerce.number().int().min(10002).max(65535).default(24999),
   DATA_DIR: z.string().default('./data'),
   ADB_BIN: z.string().default('adb'),
+  AUTO_PRUNE_ON_DELETE: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? true : v !== 'false')),
+  PRUNE_DANGLING_IMAGES_ON_DELETE: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? true : v !== 'false')),
 });
 
 export type AppEnv = z.infer<typeof EnvSchema>;

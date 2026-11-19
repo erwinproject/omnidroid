@@ -18,12 +18,15 @@ import { registerInstanceRoutes } from './routes/instances.routes.js';
 import { registerProfileRoutes } from './routes/profiles.routes.js';
 import { registerProxyRoutes } from './routes/proxies.routes.js';
 import { registerScreenRoutes } from './routes/screen.routes.js';
+import { registerSystemRoutes } from './routes/system.routes.js';
 import { registerUiRoutes } from './routes/ui.routes.js';
 import { AdbService, type AdbExecutor } from './services/adb.service.js';
 import { AiSnapshotService } from './services/ai-snapshot.service.js';
 import { InputService } from './services/input.service.js';
 import { InstanceOrchestrator } from './services/instance.orchestrator.js';
 import { ProxyRelayService } from './services/proxy-relay.service.js';
+import { PruneService } from './services/prune.service.js';
+import { RecordingService } from './services/recording.service.js';
 import { StealthService } from './services/stealth.service.js';
 import { StreamService } from './services/stream.service.js';
 import { UiAutomationService } from './services/ui-automation.service.js';
@@ -47,11 +50,24 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
   const adb = options.adb ?? new AdbService(env.ADB_BIN);
   const stealth = new StealthService(adb);
   const proxyRelay = new ProxyRelayService(env);
+  const recordings = new RecordingService(env);
+  const prune = new PruneService(env, store, docker, recordings);
   const input = new InputService(adb);
   const ui = new UiAutomationService(adb, input);
   const aiSnapshot = new AiSnapshotService(adb, ui);
   const stream = new StreamService(adb);
-  const orchestrator = new InstanceOrchestrator(env, store, docker, adb, stealth, proxyRelay);
+  const orchestrator = new InstanceOrchestrator(
+    env,
+    store,
+    docker,
+    adb,
+    stealth,
+    proxyRelay,
+    recordings,
+    prune,
+    stream,
+    aiSnapshot,
+  );
 
   const ctx: AppContext = {
     env,
@@ -60,6 +76,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
     adb,
     stealth,
     proxyRelay,
+    recordings,
+    prune,
     input,
     ui,
     aiSnapshot,
@@ -103,7 +121,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
         { name: 'Files', description: 'Android filesystem list, push, pull & delete' },
         { name: 'Device', description: 'Shell, clipboard, GPS, battery, network, rotation & stealth check' },
         { name: 'Proxy', description: 'Multi-protocol proxy pool, auth relay, live exit IP verification & timezone sync' },
-        { name: 'System', description: 'Host Redroid base & Google Play Store image status' },
+        { name: 'System', description: 'Host Redroid images, storage dry-run preview & unused resource prune' },
       ],
     },
   });
@@ -159,6 +177,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
   registerFileRoutes(app, ctx);
   registerDeviceRoutes(app, ctx);
   registerProxyRoutes(app, ctx);
+  registerSystemRoutes(app, ctx);
   registerWsRoutes(app, ctx);
 
   if (env.NODE_ENV !== 'test') {

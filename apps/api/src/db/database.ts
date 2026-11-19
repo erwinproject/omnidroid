@@ -264,6 +264,49 @@ export class StateStore {
       .run(snap.id, snap.instanceId, snap.name, snap.filePath, snap.sizeBytes, snap.createdAt);
   }
 
+  listAllSnapshots(): SnapshotRecord[] {
+    const rows = this.db
+      .prepare(
+        'SELECT id, instance_id, name, file_path, size_bytes, created_at FROM snapshots ORDER BY created_at DESC',
+      )
+      .all() as Array<{
+      id: string;
+      instance_id: string;
+      name: string;
+      file_path: string;
+      size_bytes: number;
+      created_at: string;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      instanceId: r.instance_id,
+      name: r.name,
+      filePath: r.file_path,
+      sizeBytes: r.size_bytes,
+      createdAt: r.created_at,
+    }));
+  }
+
+  deleteSnapshot(snapId: string): boolean {
+    const res = this.db.prepare('DELETE FROM snapshots WHERE id = ?').run(snapId);
+    return Number(res.changes) > 0;
+  }
+
+  deleteOrphanedSnapshotRows(): number {
+    const res = this.db
+      .prepare('DELETE FROM snapshots WHERE instance_id NOT IN (SELECT id FROM instances)')
+      .run();
+    return Number(res.changes);
+  }
+
+  checkpoint(): void {
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    } catch {
+      // Safe no-op for in-memory test DBs or transient lock
+    }
+  }
+
   close(): void {
     this.db.close();
   }

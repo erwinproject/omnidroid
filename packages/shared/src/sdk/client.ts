@@ -5,6 +5,8 @@ import type {
   CreateDeviceProfileInput,
   CreateInstanceInput,
   CreateProxyProfileInput,
+  DeleteInstanceResult,
+  DeleteSnapshotResult,
   DeviceProfile,
   GeneratedIdentity,
   GestureInput,
@@ -17,6 +19,8 @@ import type {
   NetworkInput,
   ProxyProfile,
   ProxyTestResult,
+  PruneOptionsInput,
+  PruneReport,
   RotationInput,
   SetInstanceProxyInput,
   ShellCommandInput,
@@ -107,9 +111,9 @@ export class EmulatorApiClient {
       this.request<InstanceRecord>(`/api/v1/instances/${id}/stop`, { method: 'POST' }),
     restart: (id: string) =>
       this.request<InstanceRecord>(`/api/v1/instances/${id}/restart`, { method: 'POST' }),
-    delete: (id: string, removeVolume = false) =>
-      this.request<{ deleted: boolean }>(
-        `/api/v1/instances/${id}?removeVolume=${String(removeVolume)}`,
+    delete: (id: string, removeVolume = true, prune = true) =>
+      this.request<DeleteInstanceResult>(
+        `/api/v1/instances/${id}?removeVolume=${String(removeVolume)}&prune=${String(prune)}`,
         { method: 'DELETE' },
       ),
     health: (id: string) => this.request<InstanceHealth>(`/api/v1/instances/${id}/health`),
@@ -128,6 +132,10 @@ export class EmulatorApiClient {
     restoreSnapshot: (id: string, snapId: string) =>
       this.request<{ restored: boolean }>(`/api/v1/instances/${id}/snapshots/${snapId}/restore`, {
         method: 'POST',
+      }),
+    deleteSnapshot: (id: string, snapId: string) =>
+      this.request<DeleteSnapshotResult>(`/api/v1/instances/${id}/snapshots/${snapId}`, {
+        method: 'DELETE',
       }),
     getProxy: (id: string) =>
       this.request<InstanceProxyState>(`/api/v1/instances/${id}/proxy`),
@@ -174,6 +182,29 @@ export class EmulatorApiClient {
 
   readonly system = {
     images: () => this.request<SystemImageStatus[]>('/api/v1/system/images'),
+    prunePreview: (options?: {
+      includeUnusedImages?: boolean;
+      includeBuildCache?: boolean;
+      minTempFileAgeMs?: number;
+    }) => {
+      const params = new URLSearchParams();
+      if (options?.includeUnusedImages !== undefined) {
+        params.set('includeUnusedImages', String(options.includeUnusedImages));
+      }
+      if (options?.includeBuildCache !== undefined) {
+        params.set('includeBuildCache', String(options.includeBuildCache));
+      }
+      if (options?.minTempFileAgeMs !== undefined) {
+        params.set('minTempFileAgeMs', String(options.minTempFileAgeMs));
+      }
+      const qs = params.toString();
+      return this.request<PruneReport>(`/api/v1/system/prune/preview${qs ? `?${qs}` : ''}`);
+    },
+    prune: (options?: PruneOptionsInput) =>
+      this.request<PruneReport>('/api/v1/system/prune', {
+        method: 'POST',
+        body: JSON.stringify(options ?? {}),
+      }),
   };
 
   readonly input = {

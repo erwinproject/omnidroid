@@ -35,6 +35,13 @@ docker compose up -d --build
 - Mendukung autentikasi `username:password` untuk HTTP/HTTPS CONNECT dan SOCKS5 RFC 1929 lewat relay per-instance di `emulator-net`.
 - Proxy Pool tersimpan di SQLite + Bulk Import + Tester latensi/exit IP/negara/ISP + Verifikasi langsung dari dalam container Android + sinkronisasi timezone.
 
+## Fitur Prune & Pembersihan Otomatis
+- **Auto-prune saat hapus instance**: `DELETE /api/v1/instances/:id` secara otomatis menghapus container, `/data` volume, file snapshot `.tar.gz`, file rekaman layar `.mp4`, serta membersihkan resource yatim (`orphaned containers/volumes`, file temp kedaluwarsa, dangling images). Dapat dikonfigurasi lewat `AUTO_PRUNE_ON_DELETE=true` dan `PRUNE_DANGLING_IMAGES_ON_DELETE=true`.
+- **Dry-run Preview & Manual Prune**:
+  - `GET /api/v1/system/prune/preview` untuk meninjau daftar item & estimasi ruang disk yang bisa dibersihkan.
+  - `POST /api/v1/system/prune` (juga tersedia lewat tombol **Prune** di header Web Dashboard) untuk membersihkan container/volume/snapshot/rekaman yatim, file sementara, dangling images, serta opsi lanjutan image Redroid tidak terpakai dan Docker build cache.
+  - `DELETE /api/v1/instances/:id/snapshots/:snapId` untuk menghapus file snapshot individual dari disk dan database.
+
 ## Development & Automated Tests
 ```bash
 npm install

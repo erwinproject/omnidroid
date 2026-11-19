@@ -44,11 +44,13 @@ export function registerInstanceRoutes(app: FastifyInstance, ctx: AppContext): v
     return ctx.orchestrator.restart(id);
   });
 
-  app.delete('/api/v1/instances/:id', { schema: { tags: ['Instances'], summary: 'Delete an instance container (and optional volume)' } }, async (req) => {
+  app.delete('/api/v1/instances/:id', { schema: { tags: ['Instances'], summary: 'Delete an instance container, its /data volume, snapshots, recordings, and auto-prune unused artifacts' } }, async (req) => {
     const { id } = req.params as { id: string };
-    const { removeVolume } = req.query as { removeVolume?: string };
-    await ctx.orchestrator.remove(id, removeVolume === 'true');
-    return { deleted: true };
+    const query = (req.query ?? {}) as { removeVolume?: string; prune?: string };
+    const removeVolume = query.removeVolume !== 'false';
+    const prune =
+      query.prune === 'true' ? true : query.prune === 'false' ? false : ctx.env.AUTO_PRUNE_ON_DELETE;
+    return ctx.orchestrator.remove(id, { removeVolume, prune });
   });
 
   app.get('/api/v1/instances/:id/health', { schema: { tags: ['Instances'], summary: 'Get boot readiness, ADB status, and container CPU/RAM metrics' } }, async (req) => {
@@ -80,5 +82,10 @@ export function registerInstanceRoutes(app: FastifyInstance, ctx: AppContext): v
     const { id, snapId } = req.params as { id: string; snapId: string };
     await ctx.orchestrator.restoreSnapshot(id, snapId);
     return { restored: true };
+  });
+
+  app.delete('/api/v1/instances/:id/snapshots/:snapId', { schema: { tags: ['Instances'], summary: 'Delete a snapshot archive from disk and database' } }, async (req) => {
+    const { id, snapId } = req.params as { id: string; snapId: string };
+    return ctx.orchestrator.deleteSnapshot(id, snapId);
   });
 }

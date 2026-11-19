@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import type { AiSnapshotResponse, InstanceHealth, InstanceRecord } from '@droidforge/shared';
 import {
   Globe,
+  HardDrive,
   KeyRound,
   Layers,
   Monitor,
@@ -24,6 +25,15 @@ import { CreateInstanceModal } from './components/CreateInstanceModal';
 import { DroidForgeMark } from './components/DroidForgeMark';
 import { InspectorPanel } from './components/InspectorPanel';
 import { LiveScreenCanvas } from './components/LiveScreenCanvas';
+import { PruneModal } from './components/PruneModal';
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
 
 type MobilePane = 'fleet' | 'screen' | 'inspector';
 type TabletPane = 'screen' | 'inspector';
@@ -46,11 +56,13 @@ export const App: React.FC = () => {
   const [fleetDrawerOpen, setFleetDrawerOpen] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [pruneModalOpen, setPruneModalOpen] = useState(false);
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(() => Boolean(getApiKey()));
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
 
   const [aiSnapshot, setAiSnapshot] = useState<AiSnapshotResponse | null>(null);
   const [aiSnapshotLoading, setAiSnapshotLoading] = useState(false);
@@ -154,18 +166,30 @@ export const App: React.FC = () => {
   async function handleInstanceAction(id: string, action: 'start' | 'stop' | 'restart' | 'delete') {
     setActionBusyId(id);
     setActionError(null);
+    if (action === 'delete') {
+      setDeleteNotice(null);
+    }
     try {
       const client = createClient();
       if (action === 'start') await client.instances.start(id);
       else if (action === 'stop') await client.instances.stop(id);
       else if (action === 'restart') await client.instances.restart(id);
       else if (action === 'delete') {
-        await client.instances.delete(id, true);
+        const res = await client.instances.delete(id, true, true);
         setConfirmDeleteId(null);
         if (selectedId === id) {
           setAiSnapshot(null);
           setShowAiOverlay(false);
         }
+        const cleanedParts = ['container'];
+        if (res.removedVolume) cleanedParts.push('/data volume');
+        if (res.removedSnapshotFiles > 0) cleanedParts.push(`${res.removedSnapshotFiles} snapshot(s)`);
+        if (res.removedRecordingFiles > 0) cleanedParts.push(`${res.removedRecordingFiles} recording(s)`);
+        const extraCount = res.prune ? res.prune.items.length : 0;
+        const reclaimedText = res.reclaimedBytes > 0 ? ` (${formatBytes(res.reclaimedBytes)} freed)` : '';
+        setDeleteNotice(
+          `Cleaned ${cleanedParts.join(', ')}${extraCount > 0 ? ` + ${extraCount} unused artifact(s)` : ''}${reclaimedText}.`,
+        );
       }
       await refresh(false);
     } catch (err) {
@@ -262,6 +286,20 @@ export const App: React.FC = () => {
           {actionError && (
             <div className="border-2 border-[var(--border)] bg-[var(--status-err-bg)] p-2.5 text-xs font-semibold text-[var(--status-err-ink)]">
               {actionError}
+            </div>
+          )}
+
+          {deleteNotice && (
+            <div className="flex items-start justify-between gap-2 border-2 border-[var(--border)] bg-[var(--status-ok-bg)] p-2.5 text-xs font-semibold text-[var(--status-ok-ink)]">
+              <span className="num">{deleteNotice}</span>
+              <button
+                type="button"
+                onClick={() => setDeleteNotice(null)}
+                aria-label="Dismiss cleanup notice"
+                className="shrink-0 p-0.5 text-[var(--status-ok-ink)] hover:opacity-75"
+              >
+                <X className="h-3.5 w-3.5" aria-hidden="true" />
+              </button>
             </div>
           )}
 
@@ -381,23 +419,28 @@ export const App: React.FC = () => {
                     )}
 
                     {confirmDeleteId === inst.id ? (
-                      <div className="flex w-full gap-1.5 pt-1">
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => void handleInstanceAction(inst.id, 'delete')}
-                          className="nb-btn nb-btn-danger flex-1 px-2.5"
-                        >
-                          {busy ? 'Deleting...' : 'Confirm Delete'}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => setConfirmDeleteId(null)}
-                          className="nb-btn nb-btn-secondary px-2.5"
-                        >
-                          Cancel
-                        </button>
+                      <div className="w-full space-y-2 border-t border-[var(--border-subtle)] pt-2">
+                        <p className="text-xs font-semibold text-[var(--status-err-ink)]">
+                          Removes container, /data volume, snapshots, and prunes unused files.
+                        </p>
+                        <div className="flex gap-1.5">
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void handleInstanceAction(inst.id, 'delete')}
+                            className="nb-btn nb-btn-danger flex-1 px-2.5"
+                          >
+                            {busy ? 'Deleting...' : 'Confirm Delete'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() => setConfirmDeleteId(null)}
+                            className="nb-btn nb-btn-secondary px-2.5"
+                          >
+                            Cancel
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <button
@@ -456,6 +499,16 @@ export const App: React.FC = () => {
             <span aria-hidden="true">/</span>
             <span>{instances.length} total</span>
           </div>
+
+          <button
+            type="button"
+            onClick={() => setPruneModalOpen(true)}
+            aria-label="Prune unused storage"
+            className="nb-btn nb-btn-secondary px-2.5 sm:px-3"
+          >
+            <HardDrive className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="hidden sm:inline">Prune</span>
+          </button>
 
           <button
             type="button"
@@ -672,6 +725,12 @@ export const App: React.FC = () => {
         open={modalOpen}
         onClose={() => setModalOpen(false)}
         onCreated={() => void refresh(false)}
+      />
+
+      <PruneModal
+        open={pruneModalOpen}
+        onClose={() => setPruneModalOpen(false)}
+        onPruned={() => void refresh(false)}
       />
 
       <ApiKeyModal
