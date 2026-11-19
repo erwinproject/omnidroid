@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DeviceProfileOverrideSchema, DeviceProfileSchema } from './profile.schema.js';
+import { ProxyConfigSchema } from './proxy.schema.js';
 
 export const InstanceStatusSchema = z.enum([
   'creating',
@@ -26,7 +27,10 @@ export const CreateInstanceSchema = z.object({
   memoryMb: z.number().int().min(1024).max(32768).default(2048),
   cpus: z.number().min(1).max(16).default(2),
   exposeAdbPort: z.boolean().default(false),
+  enablePlayStore: z.boolean().default(false),
   proxy: z.string().optional(),
+  proxyConfig: ProxyConfigSchema.nullable().optional(),
+  proxyProfileId: z.string().nullable().optional(),
   customProps: z.record(z.string()).optional(),
   autoStart: z.boolean().default(true),
 });
@@ -50,7 +54,10 @@ export const InstanceRecordSchema = z.object({
   memoryMb: z.number().int(),
   cpus: z.number(),
   stealthMode: z.boolean(),
+  enablePlayStore: z.boolean().default(false),
   proxy: z.string().nullable(),
+  proxyConfig: ProxyConfigSchema.nullable().default(null),
+  proxyProfileId: z.string().nullable().default(null),
   profile: DeviceProfileSchema,
   customProps: z.record(z.string()),
   createdAt: z.string(),

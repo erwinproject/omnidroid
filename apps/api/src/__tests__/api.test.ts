@@ -1,12 +1,15 @@
 import type { ChildProcess } from 'node:child_process';
+import http from 'node:http';
+import net from 'node:net';
 import sharp from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
-import { BUILTIN_DEVICE_PROFILES } from '@droidforge/shared';
+import { BUILTIN_DEVICE_PROFILES, parseProxyString } from '@droidforge/shared';
 import { buildApp } from '../app.js';
 import { loadEnv } from '../config/env.js';
 import { buildRedroidBootArgs, type RedroidDockerManager } from '../docker/redroid-docker.manager.js';
 import type { AdbExecutor } from '../services/adb.service.js';
 import { extractInteractiveElements } from '../services/ai-snapshot.service.js';
+import { ProxyRelayService } from '../services/proxy-relay.service.js';
 import { matchSelector, parseUiHierarchyXml } from '../services/ui-automation.service.js';
 
 const SAMPLE_UI_XML = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
@@ -37,6 +40,17 @@ function createMockDocker(): RedroidDockerManager {
     cloneVolume: vi.fn().mockResolvedValue(undefined),
     backupVolumeToTar: vi.fn().mockResolvedValue(4096),
     restoreVolumeFromTar: vi.fn().mockResolvedValue(undefined),
+    getSystemImages: vi.fn().mockResolvedValue([
+      {
+        androidVersion: '13',
+        baseImage: 'redroid/redroid:13.0.0-latest',
+        baseInstalled: true,
+        playStoreImage: 'droidforge/redroid:13.0.0-playstore',
+        playStoreInstalled: true,
+        playStoreSizeMb: 1900,
+        buildCommand: 'bash scripts/build-playstore-image.sh 13',
+      },
+    ]),
   } as unknown as RedroidDockerManager;
 }
 
@@ -299,5 +313,513 @@ describe('DroidForge Fastify REST API Contract', () => {
     expect(stealthRes.json().score).toBeLessThan(60);
 
     await app.close();
+  });
+});
+
+function listenServer(server: net.Server | http.Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      if (!addr || typeof addr === 'string') {
+        reject(new Error('Expected TCP address'));
+        return;
+      }
+      resolve(addr.port);
+    });
+  });
+}
+
+function sendConnectEcho(
+  relayHost: string,
+  relayPort: number,
+  targetHost: string,
+  targetPort: number,
+  payload: string,
+): Promise<{ statusLine: string; reply: string }> {
+  return new Promise((resolve, reject) => {
+    const sock = net.createConnection({ host: relayHost, port: relayPort }, () => {
+      sock.write(`CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n\r\n`);
+    });
+    let buf = Buffer.alloc(0);
+    let connected = false;
+    let statusLine = '';
+    const timer = setTimeout(() => {
+      sock.destroy();
+      reject(new Error('CONNECT echo timed out'));
+    }, 5000);
+
+    sock.on('data', (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      if (!connected) {
+        const end = buf.indexOf('\r\n\r\n');
+        if (end === -1) return;
+        const head = buf.subarray(0, end).toString('utf8');
+        statusLine = head.split(/\r?\n/)[0] ?? '';
+        if (!statusLine.includes('200')) {
+          clearTimeout(timer);
+          sock.destroy();
+          resolve({ statusLine, reply: '' });
+          return;
+        }
+        connected = true;
+        buf = buf.subarray(end + 4);
+        sock.write(payload);
+      }
+      if (connected && buf.length > 0) {
+        const text = buf.toString('utf8');
+        if (text.includes(`ECHO:${payload}`)) {
+          clearTimeout(timer);
+          sock.destroy();
+          resolve({ statusLine, reply: text });
+        }
+      }
+    });
+    sock.once('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function sendProxiedHttpGet(relayHost: string, relayPort: number, targetUrl: string): Promise<{ statusCode: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: relayHost,
+        port: relayPort,
+        method: 'GET',
+        path: targetUrl,
+        headers: { Host: new URL(targetUrl).host },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => {
+          resolve({ statusCode: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') });
+        });
+      },
+    );
+    req.once('error', reject);
+    req.end();
+  });
+}
+
+describe('Play Store Boot Flags & Proxy Subsystem', () => {
+  it('sets ro.setupwizard.mode=DISABLED in buildRedroidBootArgs for GApps/Play Store containers', () => {
+    const profile = BUILTIN_DEVICE_PROFILES[0];
+    const args = buildRedroidBootArgs({
+      width: 1080,
+      height: 2400,
+      dpi: 420,
+      fps: 30,
+      gpuMode: 'guest',
+      stealthMode: true,
+      profile,
+      customProps: {},
+    });
+    expect(args).toContain('ro.setupwizard.mode=DISABLED');
+  });
+
+  it('parses HTTP, HTTPS, SOCKS5, user:pass@host:port, and host:port:user:pass strings', () => {
+    expect(parseProxyString('http://alice:s3cr3t@10.0.0.1:8080')).toEqual({
+      protocol: 'http',
+      host: '10.0.0.1',
+      port: 8080,
+      username: 'alice',
+      password: 's3cr3t',
+      bypass: 'localhost,127.0.0.1',
+    });
+
+    expect(parseProxyString('https://proxy.corp:8443')).toEqual({
+      protocol: 'https',
+      host: 'proxy.corp',
+      port: 8443,
+      bypass: 'localhost,127.0.0.1',
+    });
+
+    expect(parseProxyString('socks5://user:pass@1.2.3.4:1080')).toEqual({
+      protocol: 'socks5',
+      host: '1.2.3.4',
+      port: 1080,
+      username: 'user',
+      password: 'pass',
+      bypass: 'localhost,127.0.0.1',
+    });
+
+    expect(parseProxyString('5.6.7.8:9090:bob:pw123', 'socks5')).toEqual({
+      protocol: 'socks5',
+      host: '5.6.7.8',
+      port: 9090,
+      username: 'bob',
+      password: 'pw123',
+      bypass: 'localhost,127.0.0.1',
+    });
+
+    expect(parseProxyString('bob:pw@9.9.9.9:3128')).toEqual({
+      protocol: 'http',
+      host: '9.9.9.9',
+      port: 3128,
+      username: 'bob',
+      password: 'pw',
+      bypass: 'localhost,127.0.0.1',
+    });
+
+    expect(parseProxyString('192.168.1.50:8888')).toEqual({
+      protocol: 'http',
+      host: '192.168.1.50',
+      port: 8888,
+      bypass: 'localhost,127.0.0.1',
+    });
+  });
+
+  it('tunnels traffic through HTTP CONNECT upstream with Basic auth and rejects bad credentials', async () => {
+    const sockets = new Set<net.Socket>();
+    const echoServer = net.createServer((sock) => {
+      sockets.add(sock);
+      sock.on('close', () => sockets.delete(sock));
+      sock.on('error', () => {});
+      sock.on('data', (d) => sock.write(Buffer.concat([Buffer.from('ECHO:'), d])));
+    });
+
+    let seenAuth = false;
+    const expectedAuth = `Basic ${Buffer.from('u1:p1').toString('base64')}`;
+    const httpProxy = net.createServer((client) => {
+      sockets.add(client);
+      client.on('close', () => sockets.delete(client));
+      client.on('error', () => {});
+      let buf = Buffer.alloc(0);
+      let connected = false;
+      client.on('data', (chunk: Buffer) => {
+        if (connected) return;
+        buf = Buffer.concat([buf, chunk]);
+        const end = buf.indexOf('\r\n\r\n');
+        if (end === -1) return;
+        connected = true;
+        const headerText = buf.subarray(0, end).toString('utf8');
+        const rest = buf.subarray(end + 4);
+        const lines = headerText.split(/\r?\n/);
+        const target = (lines[0] ?? '').split(' ')[1] ?? '';
+        const authLine = lines.find((l) => l.toLowerCase().startsWith('proxy-authorization:'));
+        const authVal = authLine ? authLine.split(':').slice(1).join(':').trim() : '';
+        if (authVal !== expectedAuth) {
+          client.write('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n');
+          client.end();
+          return;
+        }
+        seenAuth = true;
+        const [tHost, tPortRaw] = target.split(':');
+        const upstream = net.createConnection({ host: tHost, port: Number(tPortRaw) }, () => {
+          sockets.add(upstream);
+          upstream.on('close', () => sockets.delete(upstream));
+          upstream.on('error', () => client.destroy());
+          client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+          if (rest.length > 0) upstream.write(rest);
+          client.pipe(upstream);
+          upstream.pipe(client);
+        });
+      });
+    });
+
+    const env = loadEnv({
+      NODE_ENV: 'test',
+      PROXY_RELAY_HOST: '127.0.0.1',
+      PROXY_RELAY_PORT_MIN: '24500',
+      PROXY_RELAY_PORT_MAX: '24549',
+    });
+    const relay = new ProxyRelayService(env);
+
+    try {
+      const echoPort = await listenServer(echoServer);
+      const proxyPort = await listenServer(httpProxy);
+
+      const endpoint = await relay.ensureRelay('test-http-ok', {
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxyPort,
+        username: 'u1',
+        password: 'p1',
+        bypass: 'localhost',
+      });
+
+      const okRes = await sendConnectEcho(endpoint.host, endpoint.port, '127.0.0.1', echoPort, 'hello-http');
+      expect(okRes.statusLine).toContain('200');
+      expect(okRes.reply).toBe('ECHO:hello-http');
+      expect(seenAuth).toBe(true);
+      expect(relay.getRelayInfo('test-http-ok').stats.totalRequests).toBeGreaterThanOrEqual(1);
+
+      const badEndpoint = await relay.ensureRelay('test-http-bad', {
+        protocol: 'http',
+        host: '127.0.0.1',
+        port: proxyPort,
+        username: 'u1',
+        password: 'wrong',
+        bypass: 'localhost',
+      });
+      const badRes = await sendConnectEcho(badEndpoint.host, badEndpoint.port, '127.0.0.1', echoPort, 'blocked');
+      expect(badRes.statusLine).toContain('502');
+    } finally {
+      await relay.stopAll();
+      for (const s of sockets) s.destroy();
+      await Promise.all([
+        new Promise<void>((r) => echoServer.close(() => r())),
+        new Promise<void>((r) => httpProxy.close(() => r())),
+      ]);
+    }
+  });
+
+  it('tunnels both CONNECT and plain HTTP GET via SOCKS5 upstream with RFC 1928/1929 user/pass auth', async () => {
+    const sockets = new Set<net.Socket>();
+    const echoServer = net.createServer((sock) => {
+      sockets.add(sock);
+      sock.on('close', () => sockets.delete(sock));
+      sock.on('error', () => {});
+      sock.on('data', (d) => sock.write(Buffer.concat([Buffer.from('ECHO:'), d])));
+    });
+    const httpTarget = http.createServer((req, res) => {
+      if (req.url === '/ping') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ pong: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+
+    let socksAuthed = 0;
+    const socksServer = net.createServer((client) => {
+      sockets.add(client);
+      client.on('close', () => sockets.delete(client));
+      client.on('error', () => {});
+      let stage: 'greeting' | 'auth' | 'connect' | 'piping' = 'greeting';
+      let buf = Buffer.alloc(0);
+
+      client.on('data', (chunk: Buffer) => {
+        if (stage === 'piping') return;
+        buf = Buffer.concat([buf, chunk]);
+
+        if (stage === 'greeting') {
+          if (buf.length < 2) return;
+          const nmethods = buf[1] ?? 0;
+          if (buf.length < 2 + nmethods) return;
+          const methods = buf.subarray(2, 2 + nmethods);
+          buf = buf.subarray(2 + nmethods);
+          if (!methods.includes(0x02)) {
+            client.write(Buffer.from([0x05, 0xff]));
+            client.end();
+            return;
+          }
+          stage = 'auth';
+          client.write(Buffer.from([0x05, 0x02]));
+        }
+
+        if (stage === 'auth') {
+          if (buf.length < 2) return;
+          const ulen = buf[1] ?? 0;
+          if (buf.length < 3 + ulen) return;
+          const plen = buf[2 + ulen] ?? 0;
+          if (buf.length < 3 + ulen + plen) return;
+          const user = buf.subarray(2, 2 + ulen).toString('utf8');
+          const pass = buf.subarray(3 + ulen, 3 + ulen + plen).toString('utf8');
+          buf = buf.subarray(3 + ulen + plen);
+          if (user !== 'suser' || pass !== 'spass') {
+            client.write(Buffer.from([0x01, 0x01]));
+            client.end();
+            return;
+          }
+          socksAuthed += 1;
+          stage = 'connect';
+          client.write(Buffer.from([0x01, 0x00]));
+        }
+
+        if (stage === 'connect') {
+          if (buf.length < 5) return;
+          const atyp = buf[3];
+          let targetHost = '';
+          let targetPort = 0;
+          let need = 0;
+          if (atyp === 0x01) {
+            need = 10;
+            if (buf.length < need) return;
+            targetHost = `${buf[4]}.${buf[5]}.${buf[6]}.${buf[7]}`;
+            targetPort = buf.readUInt16BE(8);
+          } else if (atyp === 0x03) {
+            const dlen = buf[4] ?? 0;
+            need = 4 + 1 + dlen + 2;
+            if (buf.length < need) return;
+            targetHost = buf.subarray(5, 5 + dlen).toString('utf8');
+            targetPort = buf.readUInt16BE(5 + dlen);
+          } else {
+            client.destroy();
+            return;
+          }
+          const rest = buf.subarray(need);
+          buf = Buffer.alloc(0);
+          stage = 'piping';
+
+          const upstream = net.createConnection({ host: targetHost, port: targetPort }, () => {
+            sockets.add(upstream);
+            upstream.on('close', () => sockets.delete(upstream));
+            upstream.on('error', () => client.destroy());
+            client.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+            if (rest.length > 0) upstream.write(rest);
+            client.pipe(upstream);
+            upstream.pipe(client);
+          });
+        }
+      });
+    });
+
+    const env = loadEnv({
+      NODE_ENV: 'test',
+      PROXY_RELAY_HOST: '127.0.0.1',
+      PROXY_RELAY_PORT_MIN: '24550',
+      PROXY_RELAY_PORT_MAX: '24599',
+    });
+    const relay = new ProxyRelayService(env);
+
+    try {
+      const echoPort = await listenServer(echoServer);
+      const httpPort = await listenServer(httpTarget);
+      const socksPort = await listenServer(socksServer);
+
+      const endpoint = await relay.ensureRelay('test-socks5', {
+        protocol: 'socks5',
+        host: '127.0.0.1',
+        port: socksPort,
+        username: 'suser',
+        password: 'spass',
+        bypass: 'localhost',
+      });
+
+      const connRes = await sendConnectEcho(endpoint.host, endpoint.port, '127.0.0.1', echoPort, 'hello-socks');
+      expect(connRes.statusLine).toContain('200');
+      expect(connRes.reply).toBe('ECHO:hello-socks');
+
+      const httpRes = await sendProxiedHttpGet(endpoint.host, endpoint.port, `http://127.0.0.1:${httpPort}/ping`);
+      expect(httpRes.statusCode).toBe(200);
+      expect(JSON.parse(httpRes.body)).toEqual({ pong: true });
+      expect(socksAuthed).toBe(2);
+    } finally {
+      await relay.stopAll();
+      for (const s of sockets) s.destroy();
+      await Promise.all([
+        new Promise<void>((r) => echoServer.close(() => r())),
+        new Promise<void>((r) => httpTarget.close(() => r())),
+        new Promise<void>((r) => socksServer.close(() => r())),
+      ]);
+    }
+  });
+
+  it('serves /api/v1/system/images, proxy pool CRUD + bulk import, Play Store selection, and instance proxy masking', async () => {
+    const env = loadEnv({
+      NODE_ENV: 'test',
+      REQUIRE_AUTH: 'false',
+      PROXY_RELAY_HOST: '127.0.0.1',
+      PROXY_RELAY_PORT_MIN: '24600',
+      PROXY_RELAY_PORT_MAX: '24699',
+    });
+    const adb = await createMockAdb(true);
+    const { app } = await buildApp({ env, docker: createMockDocker(), adb });
+
+    try {
+      // 1. System image readiness
+      const sysRes = await app.inject({ method: 'GET', url: '/api/v1/system/images' });
+      expect(sysRes.statusCode).toBe(200);
+      const images = sysRes.json() as Array<{ androidVersion: string; playStoreImage: string }>;
+      expect(images.some((i) => i.androidVersion === '13' && i.playStoreImage === 'droidforge/redroid:13.0.0-playstore')).toBe(true);
+
+      // 2. Proxy Pool CRUD & Bulk Import
+      const createProxy = await app.inject({
+        method: 'POST',
+        url: '/api/v1/proxies',
+        payload: {
+          name: 'Unit SOCKS5',
+          protocol: 'socks5',
+          host: '10.10.0.2',
+          port: 1080,
+          username: 'u',
+          password: 'secret-pool-password',
+          bypass: 'localhost,127.0.0.1',
+        },
+      });
+      expect(createProxy.statusCode).toBe(201);
+      const createdProxy = createProxy.json();
+      expect(createdProxy.password).toBe('***');
+
+      const importRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/proxies/import',
+        payload: {
+          defaultProtocol: 'http',
+          text: 'http://alice:pw@1.1.1.1:8080\nsocks5://2.2.2.2:1080\ninvalid-line-without-port',
+        },
+      });
+      expect(importRes.statusCode).toBe(201);
+      const importJson = importRes.json();
+      expect(importJson.imported).toHaveLength(2);
+      expect(importJson.failed).toHaveLength(1);
+
+      const listRes = await app.inject({ method: 'GET', url: '/api/v1/proxies' });
+      expect(listRes.statusCode).toBe(200);
+      expect(listRes.json().length).toBeGreaterThanOrEqual(3);
+
+      const delRes = await app.inject({ method: 'DELETE', url: `/api/v1/proxies/${createdProxy.id}` });
+      expect(delRes.statusCode).toBe(200);
+
+      // 3. Play Store image selection
+      const createPlay = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: {
+          name: 'playstore-unit',
+          androidVersion: '13',
+          enablePlayStore: true,
+          autoStart: false,
+        },
+      });
+      expect(createPlay.statusCode).toBe(201);
+      const playInst = createPlay.json();
+      expect(playInst.enablePlayStore).toBe(true);
+      expect(playInst.image).toBe('droidforge/redroid:13.0.0-playstore');
+
+      // 4. Instance proxy attach, mask, get, and clear
+      const setProxyRes = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/instances/${playInst.id}/proxy`,
+        payload: {
+          enabled: true,
+          config: {
+            protocol: 'socks5',
+            host: '1.2.3.4',
+            port: 1080,
+            username: 'alice',
+            password: 'secret',
+            bypass: 'localhost,127.0.0.1',
+          },
+          syncTimezone: false,
+        },
+      });
+      expect(setProxyRes.statusCode).toBe(200);
+      const proxyState = setProxyRes.json();
+      expect(proxyState.enabled).toBe(true);
+      expect(proxyState.config.hasPassword).toBe(true);
+      expect(proxyState.config.password).toBeUndefined();
+
+      const instRes = await app.inject({ method: 'GET', url: `/api/v1/instances/${playInst.id}` });
+      expect(instRes.statusCode).toBe(200);
+      expect(instRes.json().proxyConfig.password).toBe('***');
+
+      const getProxyRes = await app.inject({ method: 'GET', url: `/api/v1/instances/${playInst.id}/proxy` });
+      expect(getProxyRes.statusCode).toBe(200);
+      expect(getProxyRes.json().enabled).toBe(true);
+
+      const clearProxyRes = await app.inject({ method: 'DELETE', url: `/api/v1/instances/${playInst.id}/proxy` });
+      expect(clearProxyRes.statusCode).toBe(200);
+      expect(clearProxyRes.json().enabled).toBe(false);
+      expect(clearProxyRes.json().config).toBeNull();
+    } finally {
+      await app.close();
+    }
   });
 });

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Docker from 'dockerode';
-import type { DeviceProfile, InstanceRecord } from '@droidforge/shared';
+import type { DeviceProfile, InstanceRecord, SystemImageStatus } from '@droidforge/shared';
 import type { AppEnv } from '../config/env.js';
 
 export interface ContainerStatsResult {
@@ -30,6 +30,7 @@ export function buildRedroidBootArgs(instance: {
     'androidboot.redroid_fps': String(fps),
     'androidboot.redroid_gpu_mode': gpuMode,
     'androidboot.use_memfd': 'true',
+    'ro.setupwizard.mode': 'DISABLED',
   };
 
   // Device identity & build props (model, brand, manufacturer, device, type, fingerprint)
@@ -123,12 +124,54 @@ export class RedroidDockerManager {
       // Pull image if not present locally
     }
 
+    if (
+      image.startsWith(`${this.env.REDROID_PLAYSTORE_IMAGE_REPO}:`) &&
+      image.endsWith('-playstore')
+    ) {
+      const verMatch = image.match(/:(\d+)\./);
+      const ver = verMatch?.[1] ?? '13';
+      const err = new Error(
+        `Play Store image "${image}" is not built locally yet. Run: bash scripts/build-playstore-image.sh ${ver}`,
+      ) as Error & { statusCode?: number };
+      err.statusCode = 400;
+      throw err;
+    }
+
     const stream = await this.docker.pull(image);
     await new Promise<void>((resolve, reject) => {
       this.docker.modem.followProgress(stream, (err: Error | null) => {
         if (err) reject(err);
         else resolve();
       });
+    });
+  }
+
+  async getSystemImages(): Promise<SystemImageStatus[]> {
+    const versions: Array<'11' | '12' | '13' | '14'> = ['11', '12', '13', '14'];
+    let imagesList: Array<{ RepoTags?: string[]; Size?: number }> = [];
+    try {
+      imagesList = (await this.docker.listImages()) as Array<{ RepoTags?: string[]; Size?: number }>;
+    } catch {
+      imagesList = [];
+    }
+
+    const findImage = (tag: string) =>
+      imagesList.find((img) => Array.isArray(img.RepoTags) && img.RepoTags.includes(tag));
+
+    return versions.map((v) => {
+      const baseImage = `${this.env.REDROID_IMAGE_REPO}:${v}.0.0-latest`;
+      const playStoreImage = `${this.env.REDROID_PLAYSTORE_IMAGE_REPO}:${v}.0.0-playstore`;
+      const baseFound = findImage(baseImage);
+      const playFound = findImage(playStoreImage);
+      return {
+        androidVersion: v,
+        baseImage,
+        baseInstalled: Boolean(baseFound),
+        playStoreImage,
+        playStoreInstalled: Boolean(playFound),
+        playStoreSizeMb: playFound?.Size ? Math.round(playFound.Size / (1024 * 1024)) : null,
+        buildCommand: `bash scripts/build-playstore-image.sh ${v}`,
+      };
     });
   }
 

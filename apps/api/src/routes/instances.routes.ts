@@ -1,21 +1,32 @@
 import type { FastifyInstance } from 'fastify';
-import { CloneInstanceSchema, CreateInstanceSchema } from '@droidforge/shared';
+import { CloneInstanceSchema, CreateInstanceSchema, type InstanceRecord } from '@droidforge/shared';
 import type { AppContext } from '../context.js';
+
+function sanitizeInstance(inst: InstanceRecord): InstanceRecord {
+  if (!inst.proxyConfig?.password) return inst;
+  return {
+    ...inst,
+    proxyConfig: {
+      ...inst.proxyConfig,
+      password: '***',
+    },
+  };
+}
 
 export function registerInstanceRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get('/api/v1/instances', { schema: { tags: ['Instances'], summary: 'List all Redroid emulator instances' } }, async () => {
-    return ctx.store.listInstances();
+    return ctx.store.listInstances().map(sanitizeInstance);
   });
 
   app.post('/api/v1/instances', { schema: { tags: ['Instances'], summary: 'Create and start a new Redroid container instance' } }, async (req, reply) => {
     const input = CreateInstanceSchema.parse(req.body);
     const created = await ctx.orchestrator.create(input);
-    return reply.code(201).send(created);
+    return reply.code(201).send(sanitizeInstance(created));
   });
 
   app.get('/api/v1/instances/:id', { schema: { tags: ['Instances'], summary: 'Get instance details' } }, async (req) => {
     const { id } = req.params as { id: string };
-    return ctx.orchestrator.requireInstance(id);
+    return sanitizeInstance(ctx.orchestrator.requireInstance(id));
   });
 
   app.post('/api/v1/instances/:id/start', { schema: { tags: ['Instances'], summary: 'Start a stopped instance' } }, async (req) => {

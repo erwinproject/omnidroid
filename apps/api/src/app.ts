@@ -16,12 +16,14 @@ import { registerFileRoutes } from './routes/files.routes.js';
 import { registerInputRoutes } from './routes/input.routes.js';
 import { registerInstanceRoutes } from './routes/instances.routes.js';
 import { registerProfileRoutes } from './routes/profiles.routes.js';
+import { registerProxyRoutes } from './routes/proxies.routes.js';
 import { registerScreenRoutes } from './routes/screen.routes.js';
 import { registerUiRoutes } from './routes/ui.routes.js';
 import { AdbService, type AdbExecutor } from './services/adb.service.js';
 import { AiSnapshotService } from './services/ai-snapshot.service.js';
 import { InputService } from './services/input.service.js';
 import { InstanceOrchestrator } from './services/instance.orchestrator.js';
+import { ProxyRelayService } from './services/proxy-relay.service.js';
 import { StealthService } from './services/stealth.service.js';
 import { StreamService } from './services/stream.service.js';
 import { UiAutomationService } from './services/ui-automation.service.js';
@@ -44,11 +46,12 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
   const docker = options.docker ?? new RedroidDockerManager(env);
   const adb = options.adb ?? new AdbService(env.ADB_BIN);
   const stealth = new StealthService(adb);
+  const proxyRelay = new ProxyRelayService(env);
   const input = new InputService(adb);
   const ui = new UiAutomationService(adb, input);
   const aiSnapshot = new AiSnapshotService(adb, ui);
   const stream = new StreamService(adb);
-  const orchestrator = new InstanceOrchestrator(env, store, docker, adb, stealth);
+  const orchestrator = new InstanceOrchestrator(env, store, docker, adb, stealth, proxyRelay);
 
   const ctx: AppContext = {
     env,
@@ -56,6 +59,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
     docker,
     adb,
     stealth,
+    proxyRelay,
     input,
     ui,
     aiSnapshot,
@@ -98,6 +102,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
         { name: 'Apps', description: 'APK install/uninstall, launch, stop, clear & permissions' },
         { name: 'Files', description: 'Android filesystem list, push, pull & delete' },
         { name: 'Device', description: 'Shell, clipboard, GPS, battery, network, rotation & stealth check' },
+        { name: 'Proxy', description: 'Multi-protocol proxy pool, auth relay, live exit IP verification & timezone sync' },
+        { name: 'System', description: 'Host Redroid base & Google Play Store image status' },
       ],
     },
   });
@@ -152,10 +158,16 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
   registerAppRoutes(app, ctx);
   registerFileRoutes(app, ctx);
   registerDeviceRoutes(app, ctx);
+  registerProxyRoutes(app, ctx);
   registerWsRoutes(app, ctx);
+
+  if (env.NODE_ENV !== 'test') {
+    await orchestrator.restoreActiveRelays();
+  }
 
   app.addHook('onClose', async () => {
     ctx.stream.stopAll();
+    await ctx.proxyRelay.stopAll();
     ctx.store.close();
   });
 

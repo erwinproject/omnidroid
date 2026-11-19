@@ -5,6 +5,7 @@ import {
   Code2,
   Copy,
   Cpu,
+  Globe,
   Layers,
   Package,
   Pause,
@@ -16,6 +17,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { buildWsUrl, createClient, getApiKey } from '../api/client';
+import { ProxyPanel } from './ProxyPanel';
 
 interface Props {
   instance: InstanceRecord;
@@ -24,9 +26,10 @@ interface Props {
   aiSnapshotLoading: boolean;
   aiSnapshotError: string | null;
   onCaptureAiSnapshot: () => void;
+  onInstanceRefresh?: () => void;
 }
 
-type Tab = 'ai' | 'apps' | 'stealth' | 'logcat' | 'api';
+type Tab = 'ai' | 'apps' | 'proxy' | 'stealth' | 'logcat' | 'api';
 
 export const InspectorPanel: React.FC<Props> = ({
   instance,
@@ -35,6 +38,7 @@ export const InspectorPanel: React.FC<Props> = ({
   aiSnapshotLoading,
   aiSnapshotError,
   onCaptureAiSnapshot,
+  onInstanceRefresh,
 }) => {
   const [tab, setTab] = useState<Tab>('ai');
   const [nodeFilter, setNodeFilter] = useState('');
@@ -259,12 +263,13 @@ export const InspectorPanel: React.FC<Props> = ({
     }
   }
 
-  const tabs: Array<{ id: Tab; label: string; icon: React.ReactNode }> = [
-    { id: 'ai', label: 'UI & AI', icon: <Layers className="h-4 w-4" aria-hidden="true" /> },
-    { id: 'apps', label: 'Apps', icon: <Package className="h-4 w-4" aria-hidden="true" /> },
-    { id: 'stealth', label: 'Stealth', icon: <ShieldCheck className="h-4 w-4" aria-hidden="true" /> },
-    { id: 'logcat', label: 'Logcat', icon: <Terminal className="h-4 w-4" aria-hidden="true" /> },
-    { id: 'api', label: 'API', icon: <Code2 className="h-4 w-4" aria-hidden="true" /> },
+  const tabs: Array<{ id: Tab; label: string; title: string; icon: React.ReactNode }> = [
+    { id: 'ai', label: 'UI', title: 'UI & AI', icon: <Layers className="h-3.5 w-3.5" aria-hidden="true" /> },
+    { id: 'apps', label: 'Apps', title: 'Apps & APK', icon: <Package className="h-3.5 w-3.5" aria-hidden="true" /> },
+    { id: 'proxy', label: 'Proxy', title: 'Proxy & Network', icon: <Globe className="h-3.5 w-3.5" aria-hidden="true" /> },
+    { id: 'stealth', label: 'Stealth', title: 'Stealth & ADB', icon: <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> },
+    { id: 'logcat', label: 'Logs', title: 'Logcat Stream', icon: <Terminal className="h-3.5 w-3.5" aria-hidden="true" /> },
+    { id: 'api', label: 'API', title: 'REST & WebSocket API', icon: <Code2 className="h-3.5 w-3.5" aria-hidden="true" /> },
   ];
 
   const filteredElements = aiSnapshot
@@ -293,6 +298,11 @@ export const InspectorPanel: React.FC<Props> = ({
       cmd: `curl -X POST "${origin}/api/v1/instances/${instance.id}/ui/click" \\\n  -H "Content-Type: application/json" \\\n  -d '{"elementId": 1}'`,
     },
     {
+      id: 'proxy',
+      title: 'Verify Exit IP Through Proxy',
+      cmd: `curl -X POST "${origin}/api/v1/instances/${instance.id}/proxy/verify"`,
+    },
+    {
       id: 'stealth',
       title: 'Stealth Audit Report',
       cmd: `curl -s "${origin}/api/v1/instances/${instance.id}/device/stealth-check"`,
@@ -304,7 +314,7 @@ export const InspectorPanel: React.FC<Props> = ({
       <div
         role="tablist"
         aria-label="Device Inspector sections"
-        className="grid shrink-0 grid-cols-5 border-b-2 border-[var(--border)] bg-[var(--bg-subtle)]"
+        className="grid shrink-0 grid-cols-6 border-b-2 border-[var(--border)] bg-[var(--bg-subtle)]"
       >
         {tabs.map((t) => {
           const active = tab === t.id;
@@ -314,17 +324,18 @@ export const InspectorPanel: React.FC<Props> = ({
               type="button"
               role="tab"
               aria-selected={active}
+              title={t.title}
               onClick={() => {
                 setTab(t.id);
                 if (t.id === 'apps') void loadApps();
               }}
-              className={`flex min-h-[44px] min-w-0 items-center justify-center gap-1 border-r-2 border-[var(--border)] px-1.5 text-xs font-bold whitespace-nowrap transition-colors last:border-r-0 sm:px-2 sm:text-[13px] ${
+              className={`flex min-h-[44px] min-w-0 items-center justify-center gap-1 border-r-2 border-[var(--border)] px-1 text-xs font-bold whitespace-nowrap transition-colors last:border-r-0 xl:px-1.5 ${
                 active
                   ? 'bg-[var(--accent)] text-[var(--accent-ink)]'
                   : 'bg-[var(--bg-surface)] text-[var(--ink-secondary)] hover:bg-[var(--bg-ground)] hover:text-[var(--ink)]'
               }`}
             >
-              <span className="hidden sm:inline-flex">{t.icon}</span>
+              <span className="hidden 2xl:inline-flex">{t.icon}</span>
               <span className="truncate">{t.label}</span>
             </button>
           );
@@ -410,6 +421,20 @@ export const InspectorPanel: React.FC<Props> = ({
                       <dt className="text-xs font-semibold text-[var(--ink-muted)]">Stealth Hardening</dt>
                       <dd className="font-bold text-[var(--ink)]">
                         {instance.stealthMode ? 'Enabled (User build)' : 'Disabled'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs font-semibold text-[var(--ink-muted)]">Play Store (GApps)</dt>
+                      <dd className="font-bold text-[var(--ink)]">
+                        {instance.enablePlayStore ? 'Enabled (MindTheGapps)' : 'AOSP Only'}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs font-semibold text-[var(--ink-muted)]">Network / Proxy</dt>
+                      <dd className="num truncate font-bold text-[var(--ink)]">
+                        {instance.proxyConfig
+                          ? `${instance.proxyConfig.protocol.toUpperCase()} ${instance.proxyConfig.host}:${instance.proxyConfig.port}`
+                          : instance.proxy || 'Direct'}
                       </dd>
                     </div>
                     <div>
@@ -708,6 +733,10 @@ export const InspectorPanel: React.FC<Props> = ({
               )}
             </div>
           </div>
+        )}
+
+        {tab === 'proxy' && (
+          <ProxyPanel instance={instance} onProxyChanged={() => onInstanceRefresh?.()} />
         )}
 
         {tab === 'logcat' && (

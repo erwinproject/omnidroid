@@ -14,14 +14,16 @@ export function registerDeviceRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.get('/api/v1/instances/:id/device/info', { schema: { tags: ['Device'], summary: 'Get system properties, foreground activity, and battery info' } }, async (req) => {
     const { id } = req.params as { id: string };
     const inst = ctx.orchestrator.requireInstance(id);
-    const [propRes, focusRes, batRes] = await Promise.all([
+    const [propRes, focusRes, batRes, vendingRes] = await Promise.all([
       ctx.adb.shell(inst.adbTarget, 'getprop'),
       ctx.adb.shell(inst.adbTarget, 'dumpsys window | grep -E "mCurrentFocus|mFocusedApp" | head -n 2'),
       ctx.adb.shell(inst.adbTarget, 'dumpsys battery'),
+      ctx.adb.shell(inst.adbTarget, 'pm path com.android.vending 2>/dev/null || true'),
     ]);
 
     const props = parseGetProp(propRes.stdout);
     const batteryLevel = Number(batRes.stdout.match(/level:\s*(\d+)/i)?.[1] ?? -1);
+    const playStoreInstalled = vendingRes.stdout.includes('package:');
 
     return {
       instanceId: inst.id,
@@ -34,6 +36,7 @@ export function registerDeviceRoutes(app: FastifyInstance, ctx: AppContext): voi
       buildTags: props['ro.build.tags'] ?? inst.profile.buildTags,
       fingerprint: props['ro.build.fingerprint'] ?? inst.profile.buildFingerprint,
       abiList: props['ro.product.cpu.abilist'] ?? '',
+      playStoreInstalled,
       foreground: focusRes.stdout,
       batteryLevel,
     };
@@ -108,8 +111,15 @@ export function registerDeviceRoutes(app: FastifyInstance, ctx: AppContext): voi
       await ctx.adb.shell(inst.adbTarget, `settings put global airplane_mode_on ${val} && am broadcast -a android.intent.action.AIRPLANE_MODE --ez state ${input.airplaneMode}`);
     }
     if (input.httpProxy !== undefined) {
-      const val = input.httpProxy === null || input.httpProxy === '' ? ':0' : input.httpProxy;
-      await ctx.adb.shell(inst.adbTarget, `settings put global http_proxy ${val}`);
+      if (input.httpProxy === null || input.httpProxy === '' || input.httpProxy === ':0') {
+        await ctx.orchestrator.clearInstanceProxy(id);
+      } else {
+        await ctx.orchestrator.applyInstanceProxy(id, {
+          enabled: true,
+          raw: input.httpProxy,
+          syncTimezone: false,
+        });
+      }
     }
     return { ok: true };
   });

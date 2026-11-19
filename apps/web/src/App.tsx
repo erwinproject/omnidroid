@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import type { AiSnapshotResponse, InstanceHealth, InstanceRecord } from '@droidforge/shared';
 import {
+  Globe,
   KeyRound,
   Layers,
   Monitor,
@@ -12,6 +13,7 @@ import {
   Shield,
   SlidersHorizontal,
   Square,
+  Store,
   Sun,
   Trash2,
   X,
@@ -324,6 +326,18 @@ export const App: React.FC = () => {
                           Stealth
                         </span>
                       )}
+                      {inst.enablePlayStore && (
+                        <span className="inline-flex items-center gap-1 border border-[var(--border)] bg-[var(--status-ok-bg)] px-1.5 py-0.5 text-xs font-bold text-[var(--status-ok-ink)]">
+                          <Store className="h-3 w-3" aria-hidden="true" />
+                          Play Store
+                        </span>
+                      )}
+                      {(inst.proxyConfig || inst.proxy) && (
+                        <span className="inline-flex items-center gap-1 border border-[var(--border)] bg-[var(--bg-subtle)] px-1.5 py-0.5 text-xs font-bold uppercase text-[var(--ink)]">
+                          <Globe className="h-3 w-3" aria-hidden="true" />
+                          {inst.proxyConfig?.protocol ?? 'Proxy'}
+                        </span>
+                      )}
                     </div>
 
                     <div className="num mt-1.5 text-xs font-semibold text-[var(--ink-muted)]">
@@ -510,7 +524,7 @@ export const App: React.FC = () => {
       </div>
 
       {/* Main Responsive Workspace */}
-      <div className="min-h-0 flex-1 overflow-hidden p-4 lg:grid lg:grid-cols-[minmax(0,1fr)_410px] lg:gap-4 xl:grid-cols-[292px_minmax(0,1fr)_440px]">
+      <div className="min-h-0 flex-1 overflow-hidden p-4 lg:grid lg:grid-cols-[minmax(0,1fr)_420px] lg:gap-4 xl:grid-cols-[288px_minmax(0,1fr)_468px]">
         {/* Desktop Fleet Sidebar (>=1280px) */}
         <aside className="nb-panel hidden h-full min-h-0 overflow-hidden xl:block">{renderFleetContent(false)}</aside>
 
@@ -574,6 +588,7 @@ export const App: React.FC = () => {
               aiSnapshotLoading={aiSnapshotLoading}
               aiSnapshotError={aiSnapshotError}
               onCaptureAiSnapshot={() => void captureAiSnapshot()}
+              onInstanceRefresh={() => void refresh(false)}
             />
           ) : (
             <div className="nb-panel flex h-full flex-col items-center justify-center gap-2 p-6 text-center">

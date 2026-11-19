@@ -26,11 +26,6 @@ export class StealthService {
     if (profile.timezone) {
       await this.adb.shell(target, `setprop persist.sys.timezone ${profile.timezone}`);
     }
-
-    // Optional HTTP proxy
-    if (proxy) {
-      await this.adb.shell(target, `settings put global http_proxy ${proxy}`);
-    }
   }
 
   async runStealthCheck(instance: InstanceRecord): Promise<StealthCheckReport> {

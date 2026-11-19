@@ -3,11 +3,30 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   BUILTIN_DEVICE_PROFILES,
+  parseProxyString,
   type DeviceProfile,
   type InstanceRecord,
   type InstanceStatus,
+  type ProxyProfile,
   type SnapshotRecord,
 } from '@droidforge/shared';
+
+function normalizeInstance(raw: InstanceRecord): InstanceRecord {
+  let proxyConfig = raw.proxyConfig ?? null;
+  if (!proxyConfig && raw.proxy) {
+    try {
+      proxyConfig = parseProxyString(raw.proxy);
+    } catch {
+      proxyConfig = null;
+    }
+  }
+  return {
+    ...raw,
+    enablePlayStore: raw.enablePlayStore ?? false,
+    proxyProfileId: raw.proxyProfileId ?? null,
+    proxyConfig,
+  };
+}
 
 export class StateStore {
   private readonly db: DatabaseSync;
@@ -47,6 +66,14 @@ export class StateStore {
         size_bytes INTEGER NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS proxies (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        data TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -80,26 +107,55 @@ export class StateStore {
     return Number(res.changes) > 0;
   }
 
+  // ---- Proxies ----
+  listProxies(): ProxyProfile[] {
+    const rows = this.db.prepare('SELECT data FROM proxies ORDER BY created_at DESC').all() as Array<{
+      data: string;
+    }>;
+    return rows.map((r) => JSON.parse(r.data) as ProxyProfile);
+  }
+
+  getProxy(id: string): ProxyProfile | undefined {
+    const row = this.db.prepare('SELECT data FROM proxies WHERE id = ?').get(id) as
+      | { data: string }
+      | undefined;
+    return row ? (JSON.parse(row.data) as ProxyProfile) : undefined;
+  }
+
+  saveProxy(proxy: ProxyProfile): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO proxies (id, name, data, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(proxy.id, proxy.name, JSON.stringify(proxy), proxy.createdAt, proxy.updatedAt);
+  }
+
+  deleteProxy(id: string): boolean {
+    const res = this.db.prepare('DELETE FROM proxies WHERE id = ?').run(id);
+    return Number(res.changes) > 0;
+  }
+
   // ---- Instances ----
   listInstances(): InstanceRecord[] {
     const rows = this.db.prepare('SELECT data FROM instances ORDER BY created_at DESC').all() as Array<{
       data: string;
     }>;
-    return rows.map((r) => JSON.parse(r.data) as InstanceRecord);
+    return rows.map((r) => normalizeInstance(JSON.parse(r.data) as InstanceRecord));
   }
 
   getInstance(id: string): InstanceRecord | undefined {
     const row = this.db.prepare('SELECT data FROM instances WHERE id = ?').get(id) as
       | { data: string }
       | undefined;
-    return row ? (JSON.parse(row.data) as InstanceRecord) : undefined;
+    return row ? normalizeInstance(JSON.parse(row.data) as InstanceRecord) : undefined;
   }
 
   getInstanceByName(name: string): InstanceRecord | undefined {
     const row = this.db.prepare('SELECT data FROM instances WHERE name = ?').get(name) as
       | { data: string }
       | undefined;
-    return row ? (JSON.parse(row.data) as InstanceRecord) : undefined;
+    return row ? normalizeInstance(JSON.parse(row.data) as InstanceRecord) : undefined;
   }
 
   saveInstance(instance: InstanceRecord): void {

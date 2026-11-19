@@ -4,19 +4,28 @@ import type {
   CloneInstanceInput,
   CreateDeviceProfileInput,
   CreateInstanceInput,
+  CreateProxyProfileInput,
   DeviceProfile,
   GeneratedIdentity,
   GestureInput,
+  ImportProxiesInput,
   InstanceHealth,
+  InstanceProxyState,
+  InstanceProxyVerifyResult,
   InstanceRecord,
   LocationInput,
   NetworkInput,
+  ProxyProfile,
+  ProxyTestResult,
   RotationInput,
+  SetInstanceProxyInput,
   ShellCommandInput,
   SnapshotRecord,
   StealthCheckReport,
   SwipeInput,
+  SystemImageStatus,
   TapInput,
+  TestProxyInput,
   TextInput,
   UiBatchActionsInput,
   UiClickInput,
@@ -120,6 +129,51 @@ export class EmulatorApiClient {
       this.request<{ restored: boolean }>(`/api/v1/instances/${id}/snapshots/${snapId}/restore`, {
         method: 'POST',
       }),
+    getProxy: (id: string) =>
+      this.request<InstanceProxyState>(`/api/v1/instances/${id}/proxy`),
+    setProxy: (id: string, input: SetInstanceProxyInput) =>
+      this.request<InstanceProxyState>(`/api/v1/instances/${id}/proxy`, {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      }),
+    clearProxy: (id: string) =>
+      this.request<InstanceProxyState>(`/api/v1/instances/${id}/proxy`, {
+        method: 'DELETE',
+      }),
+    verifyProxy: (id: string) =>
+      this.request<InstanceProxyVerifyResult>(`/api/v1/instances/${id}/proxy/verify`, {
+        method: 'POST',
+      }),
+  };
+
+  readonly proxies = {
+    list: () => this.request<ProxyProfile[]>('/api/v1/proxies'),
+    create: (input: CreateProxyProfileInput) =>
+      this.request<ProxyProfile>('/api/v1/proxies', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    import: (input: ImportProxiesInput) =>
+      this.request<{ imported: ProxyProfile[]; failed: Array<{ line: string; error: string }> }>(
+        '/api/v1/proxies/import',
+        {
+          method: 'POST',
+          body: JSON.stringify(input),
+        },
+      ),
+    delete: (id: string) =>
+      this.request<{ deleted: boolean }>(`/api/v1/proxies/${id}`, { method: 'DELETE' }),
+    test: (input: TestProxyInput) =>
+      this.request<ProxyTestResult>('/api/v1/proxies/test', {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    testById: (id: string) =>
+      this.request<ProxyTestResult>(`/api/v1/proxies/${id}/test`, { method: 'POST' }),
+  };
+
+  readonly system = {
+    images: () => this.request<SystemImageStatus[]>('/api/v1/system/images'),
   };
 
   readonly input = {

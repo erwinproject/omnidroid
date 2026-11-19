@@ -1,6 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import type { CreateInstanceInput, DeviceProfile } from '@droidforge/shared';
-import { RefreshCw, ShieldCheck, Shuffle, X } from 'lucide-react';
+import {
+  parseProxyString,
+  type CreateInstanceInput,
+  type DeviceProfile,
+  type ProxyProfile,
+  type ProxyProtocol,
+  type ProxyTestResult,
+  type SystemImageStatus,
+} from '@droidforge/shared';
+import { Globe, RefreshCw, ShieldCheck, Shuffle, Store, X, Zap } from 'lucide-react';
 import { createClient } from '../api/client';
 
 interface Props {
@@ -18,10 +26,19 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   const [androidVersion, setAndroidVersion] = useState<'11' | '12' | '13' | '14'>('13');
   const [profileId, setProfileId] = useState('pixel-8-pro');
   const [stealthMode, setStealthMode] = useState(true);
+  const [enablePlayStore, setEnablePlayStore] = useState(false);
+  const [playStoreTouched, setPlayStoreTouched] = useState(false);
   const [exposeAdbPort, setExposeAdbPort] = useState(false);
   const [memoryMb, setMemoryMb] = useState(2048);
   const [cpus, setCpus] = useState(2);
+  const [proxyMode, setProxyMode] = useState<'none' | 'saved' | 'custom'>('none');
+  const [proxyProfileId, setProxyProfileId] = useState('');
+  const [proxyProtocol, setProxyProtocol] = useState<ProxyProtocol>('http');
   const [proxy, setProxy] = useState('');
+  const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
+  const [testingProxy, setTestingProxy] = useState(false);
+  const [savedProxies, setSavedProxies] = useState<ProxyProfile[]>([]);
+  const [systemImages, setSystemImages] = useState<SystemImageStatus[]>([]);
   const [customImage, setCustomImage] = useState('');
 
   const [brand, setBrand] = useState('');
@@ -42,12 +59,27 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   function loadProfiles() {
     setProfilesLoading(true);
     setError(null);
-    createClient()
-      .profiles.list()
-      .then((list) => {
+    const client = createClient();
+    Promise.all([
+      client.profiles.list(),
+      client.system.images().catch(() => [] as SystemImageStatus[]),
+      client.proxies.list().catch(() => [] as ProxyProfile[]),
+    ])
+      .then(([list, imgs, proxies]) => {
         setProfiles(list);
         const initial = list.find((p) => p.id === profileId) ?? list[0];
         if (initial) applyPresetFields(initial);
+        setSystemImages(imgs);
+        setSavedProxies(proxies);
+        if (proxies.length > 0 && !proxyProfileId) {
+          setProxyProfileId(proxies[0].id);
+        }
+        if (!playStoreTouched) {
+          const img13 = imgs.find((i) => i.androidVersion === '13');
+          if (img13?.playStoreInstalled) {
+            setEnablePlayStore(true);
+          }
+        }
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setProfilesLoading(false));
@@ -95,23 +127,56 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
     }
   }
 
+  const selectedImageStatus = systemImages.find((img) => img.androidVersion === androidVersion);
+
+  async function handleTestCreateProxy() {
+    setTestingProxy(true);
+    setProxyTestResult(null);
+    setError(null);
+    try {
+      let result: ProxyTestResult;
+      if (proxyMode === 'saved' && proxyProfileId) {
+        result = await createClient().proxies.test({ proxyProfileId });
+      } else if (proxyMode === 'custom' && proxy.trim()) {
+        const parsed = parseProxyString(proxy.trim(), proxyProtocol);
+        result = await createClient().proxies.test({ config: parsed });
+      } else {
+        throw new Error('Select a saved proxy or enter a proxy endpoint first.');
+      }
+      setProxyTestResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTestingProxy(false);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setError(null);
     try {
+      let proxyPayload: Pick<CreateInstanceInput, 'proxyProfileId' | 'proxyConfig' | 'proxy'> = {};
+      if (proxyMode === 'saved' && proxyProfileId) {
+        proxyPayload = { proxyProfileId };
+      } else if (proxyMode === 'custom' && proxy.trim()) {
+        const parsedProxy = parseProxyString(proxy.trim(), proxyProtocol);
+        proxyPayload = { proxyConfig: parsedProxy };
+      }
+
       const payload: CreateInstanceInput = {
         name,
         androidVersion,
         profileId,
         stealthMode,
+        enablePlayStore,
         exposeAdbPort,
         memoryMb,
         cpus,
         fps: 30,
         gpuMode: 'guest',
         autoStart: true,
-        ...(proxy.trim() ? { proxy: proxy.trim() } : {}),
+        ...proxyPayload,
         ...(customImage.trim() ? { customImage: customImage.trim() } : {}),
         deviceProfile: {
           brand: brand || undefined,
@@ -201,7 +266,14 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                 <select
                   id="inst-android"
                   value={androidVersion}
-                  onChange={(e) => setAndroidVersion(e.target.value as '11' | '12' | '13' | '14')}
+                  onChange={(e) => {
+                    const nextVer = e.target.value as '11' | '12' | '13' | '14';
+                    setAndroidVersion(nextVer);
+                    if (!playStoreTouched) {
+                      const img = systemImages.find((item) => item.androidVersion === nextVer);
+                      setEnablePlayStore(Boolean(img?.playStoreInstalled));
+                    }
+                  }}
                   className="nb-input"
                 >
                   <option value="11">Android 11</option>
@@ -424,6 +496,52 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                   <span>Expose Host ADB Port (15555-19999)</span>
                 </label>
               </div>
+
+              <div className="border-2 border-[var(--border)] bg-[var(--bg-surface)] p-3 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="flex min-h-[44px] cursor-pointer items-center gap-2.5 text-[13px] font-bold text-[var(--ink)]">
+                    <input
+                      type="checkbox"
+                      checked={enablePlayStore}
+                      disabled={androidVersion === '11'}
+                      onChange={(e) => {
+                        setPlayStoreTouched(true);
+                        setEnablePlayStore(e.target.checked);
+                      }}
+                      className="h-4 w-4 shrink-0 accent-[var(--ink)]"
+                    />
+                    <Store className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>Google Play Store + GMS (MindTheGapps)</span>
+                  </label>
+                  {selectedImageStatus && (
+                    <span
+                      className={`num border-2 border-[var(--border)] px-2 py-0.5 text-xs font-extrabold uppercase ${
+                        selectedImageStatus.playStoreInstalled
+                          ? 'bg-[var(--status-ok-bg)] text-[var(--status-ok-ink)]'
+                          : 'bg-[var(--status-warn-bg)] text-[var(--status-warn-ink)]'
+                      }`}
+                    >
+                      {selectedImageStatus.playStoreInstalled
+                        ? `Built (${selectedImageStatus.playStoreSizeMb ?? '?'} MB)`
+                        : 'Not Built'}
+                    </span>
+                  )}
+                </div>
+                {androidVersion === '11' ? (
+                  <p className="text-xs text-[var(--ink-muted)]">
+                    Play Store MindTheGapps overlay is supported on Android 12, 13, and 14.
+                  </p>
+                ) : selectedImageStatus && !selectedImageStatus.playStoreInstalled ? (
+                  <div className="border-2 border-[var(--border)] bg-[var(--status-warn-bg)] p-2 text-xs font-semibold text-[var(--status-warn-ink)]">
+                    Build Play Store image on server first:{' '}
+                    <code>{selectedImageStatus.buildCommand}</code>
+                  </div>
+                ) : (
+                  <p className="text-xs text-[var(--ink-muted)]">
+                    Boots {selectedImageStatus?.playStoreImage ?? `droidforge/redroid:${androidVersion}.0.0-playstore`} with Google Play Store and ARM translation.
+                  </p>
+                )}
+              </div>
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -469,31 +587,151 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label htmlFor="inst-proxy" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
-                  HTTP Proxy (optional, host:port)
-                </label>
-                <input
-                  id="inst-proxy"
-                  value={proxy}
-                  onChange={(e) => setProxy(e.target.value)}
-                  placeholder="192.168.1.10:8888"
-                  className="nb-input num"
-                />
+            <div className="space-y-3 border-2 border-[var(--border)] bg-[var(--bg-ground)] p-3 sm:p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-extrabold text-[var(--ink)]">
+                  <Globe className="h-4 w-4 shrink-0" aria-hidden="true" />
+                  <span>Network Proxy (HTTP / HTTPS / SOCKS5 + Auth)</span>
+                </div>
+                {proxyMode !== 'none' && (
+                  <button
+                    type="button"
+                    disabled={testingProxy}
+                    onClick={() => void handleTestCreateProxy()}
+                    className="nb-btn nb-btn-secondary"
+                  >
+                    <Zap className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <span>{testingProxy ? 'Testing...' : 'Test Proxy'}</span>
+                  </button>
+                )}
               </div>
-              <div>
-                <label htmlFor="inst-custom-image" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
-                  Custom Redroid Image (optional)
-                </label>
-                <input
-                  id="inst-custom-image"
-                  value={customImage}
-                  onChange={(e) => setCustomImage(e.target.value)}
-                  placeholder="redroid/redroid:13.0.0-latest"
-                  className="nb-input"
-                />
+
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProxyMode('none');
+                    setProxyTestResult(null);
+                  }}
+                  className={`nb-btn ${proxyMode === 'none' ? 'nb-btn-primary' : 'nb-btn-secondary'}`}
+                >
+                  Direct
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProxyMode('saved');
+                    setProxyTestResult(null);
+                  }}
+                  className={`nb-btn ${proxyMode === 'saved' ? 'nb-btn-primary' : 'nb-btn-secondary'}`}
+                >
+                  Saved ({savedProxies.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProxyMode('custom');
+                    setProxyTestResult(null);
+                  }}
+                  className={`nb-btn ${proxyMode === 'custom' ? 'nb-btn-primary' : 'nb-btn-secondary'}`}
+                >
+                  Custom
+                </button>
               </div>
+
+              {proxyMode === 'saved' && (
+                <div>
+                  <label htmlFor="inst-proxy-profile" className="mb-1 block text-xs font-bold text-[var(--ink-secondary)]">
+                    Select Saved Proxy from Pool
+                  </label>
+                  {savedProxies.length === 0 ? (
+                    <div className="border-2 border-dashed border-[var(--border)] bg-[var(--bg-surface)] p-2.5 text-xs text-[var(--ink-muted)]">
+                      No saved proxies found in pool. Switch to Custom to enter one directly.
+                    </div>
+                  ) : (
+                    <select
+                      id="inst-proxy-profile"
+                      value={proxyProfileId}
+                      onChange={(e) => {
+                        setProxyProfileId(e.target.value);
+                        setProxyTestResult(null);
+                      }}
+                      className="nb-input num"
+                    >
+                      {savedProxies.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name} ({p.protocol.toUpperCase()} {p.host}:{p.port}
+                          {p.lastCountryCode ? ` - ${p.lastCountryCode}` : ''})
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
+              {proxyMode === 'custom' && (
+                <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-[140px_minmax(0,1fr)]">
+                  <div>
+                    <label htmlFor="inst-proxy-proto" className="mb-1 block text-xs font-bold text-[var(--ink-secondary)]">
+                      Default Protocol
+                    </label>
+                    <select
+                      id="inst-proxy-proto"
+                      value={proxyProtocol}
+                      onChange={(e) => setProxyProtocol(e.target.value as ProxyProtocol)}
+                      className="nb-input"
+                    >
+                      <option value="http">HTTP</option>
+                      <option value="https">HTTPS</option>
+                      <option value="socks5">SOCKS5</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="inst-proxy" className="mb-1 block text-xs font-bold text-[var(--ink-secondary)]">
+                      Proxy Endpoint (url or host:port[:user:pass])
+                    </label>
+                    <input
+                      id="inst-proxy"
+                      value={proxy}
+                      onChange={(e) => setProxy(e.target.value)}
+                      placeholder="socks5://user:pass@1.2.3.4:1080"
+                      className="nb-input num"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {proxyTestResult && (
+                <div
+                  className={`border-2 border-[var(--border)] p-2.5 text-xs font-semibold ${
+                    proxyTestResult.ok
+                      ? 'bg-[var(--status-ok-bg)] text-[var(--status-ok-ink)]'
+                      : 'bg-[var(--status-err-bg)] text-[var(--status-err-ink)]'
+                  }`}
+                >
+                  {proxyTestResult.ok ? (
+                    <span className="num">
+                      Proxy OK ({proxyTestResult.latencyMs ?? '?'} ms) / Exit IP: {proxyTestResult.exitIp} (
+                      {[proxyTestResult.city, proxyTestResult.countryCode].filter(Boolean).join(', ') || 'Unknown'})
+                    </span>
+                  ) : (
+                    <span>Proxy test failed: {proxyTestResult.error}</span>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="inst-custom-image" className="mb-1 block text-[13px] font-bold text-[var(--ink)]">
+                Custom Redroid Image (optional)
+              </label>
+              <input
+                id="inst-custom-image"
+                value={customImage}
+                onChange={(e) => setCustomImage(e.target.value)}
+                placeholder="redroid/redroid:13.0.0-latest"
+                className="nb-input"
+              />
             </div>
           </div>
 

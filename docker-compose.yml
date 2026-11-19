@@ -13,8 +13,12 @@ services:
       DOCKER_SOCKET: /var/run/docker.sock
       DOCKER_NETWORK: ${DOCKER_NETWORK:-emulator-net}
       REDROID_IMAGE_REPO: ${REDROID_IMAGE_REPO:-redroid/redroid}
+      REDROID_PLAYSTORE_IMAGE_REPO: ${REDROID_PLAYSTORE_IMAGE_REPO:-droidforge/redroid}
       ADB_PORT_MIN: ${ADB_PORT_MIN:-15555}
       ADB_PORT_MAX: ${ADB_PORT_MAX:-19999}
+      PROXY_RELAY_HOST: ${PROXY_RELAY_HOST:-}
+      PROXY_RELAY_PORT_MIN: ${PROXY_RELAY_PORT_MIN:-24000}
+      PROXY_RELAY_PORT_MAX: ${PROXY_RELAY_PORT_MAX:-24999}
       DATA_DIR: /data
       ADB_BIN: adb
     volumes:
