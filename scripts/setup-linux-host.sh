@@ -17,7 +17,7 @@ fi
 
 echo "[1/4] Checking kernel modules (binder_linux)..."
 if ! modprobe binder_linux devices="binder,hwbinder,vndbinder" 2>/dev/null; then
-  echo "  -> binder_linux not loaded yet. Installing linux-modules-extra-$(uname -r)..."
+  echo "  -> binder_linux not loaded yet. Trying linux-modules-extra-$(uname -r) (Ubuntu only)..."
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
     apt-get install -y "linux-modules-extra-$(uname -r)" || true
@@ -37,11 +37,14 @@ cat <<EOF > /etc/modprobe.d/redroid.conf
 options binder_linux devices="binder,hwbinder,vndbinder"
 EOF
 
-echo "[2/4] Verifying binderfs support..."
+echo "[2/4] Verifying binder support..."
 if grep -q binder /proc/filesystems; then
   echo "  -> binderfs is ACTIVE."
+elif [[ -e /dev/binder && -e /dev/hwbinder && -e /dev/vndbinder ]]; then
+  # Kernels built without CONFIG_ANDROID_BINDERFS (e.g. Debian) expose misc devices instead.
+  echo "  -> binder devices ACTIVE (/dev/binder, /dev/hwbinder, /dev/vndbinder)."
 else
-  echo "[ERROR] binderfs not found in /proc/filesystems after modprobe."
+  echo "[ERROR] Neither binderfs nor /dev/{binder,hwbinder,vndbinder} found after modprobe."
   exit 1
 fi
 
