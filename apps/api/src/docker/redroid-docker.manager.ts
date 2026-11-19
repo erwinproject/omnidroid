@@ -76,6 +76,12 @@ export function buildRedroidBootArgs(instance: {
     'androidboot.redroid_fps': String(fps),
     'androidboot.redroid_gpu_mode': gpuMode,
     'androidboot.use_memfd': 'true',
+    // Redroid 12/13/14 libcutils creates memfds without F_SEAL_SHRINK|F_SEAL_GROW when
+    // androidboot.use_memfd=true (required on Linux 5.18+ without /dev/ashmem).
+    // Modern Chrome/Chromium requires those seals in GetMemoryProtectionMask() and crashes
+    // with SIGTRAP unless ro.vendor.api_level >= 202404, which enables Chromium's direct
+    // memfd_create + ftruncate + F_ADD_SEALS(F_SEAL_SHRINK|F_SEAL_GROW) path.
+    'ro.vendor.api_level': '202404',
     'ro.setupwizard.mode': 'DISABLED',
   };
 

@@ -162,6 +162,8 @@ describe('Redroid Boot Args & Stealth Prop Injection', () => {
       customProps: { 'persist.custom.flag': 'enabled' },
     });
 
+    expect(args).toContain('androidboot.use_memfd=true');
+    expect(args).toContain('ro.vendor.api_level=202404');
     expect(args).toContain('ro.product.model=SM-S928B');
     expect(args).toContain('ro.product.brand=samsung');
     expect(args).toContain('ro.build.type=user');
@@ -173,6 +175,22 @@ describe('Redroid Boot Args & Stealth Prop Injection', () => {
     expect(args).toContain('ro.hardware.hwcomposer=redroid');
     expect(args.some((a) => a.startsWith('ro.boot.hardware='))).toBe(false);
     expect(args).toContain('persist.custom.flag=enabled');
+  });
+
+  it('allows customProps to override the default ro.vendor.api_level', () => {
+    const args = buildRedroidBootArgs({
+      width: 1080,
+      height: 2400,
+      dpi: 420,
+      fps: 30,
+      gpuMode: 'guest',
+      stealthMode: true,
+      profile: BUILTIN_DEVICE_PROFILES[0],
+      customProps: { 'ro.vendor.api_level': '33' },
+    });
+
+    expect(args).toContain('ro.vendor.api_level=33');
+    expect(args).not.toContain('ro.vendor.api_level=202404');
   });
 });
 
