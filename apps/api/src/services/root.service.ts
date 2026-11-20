@@ -15,8 +15,9 @@ const POLICY_FILE = 'root_policy.conf';
 
 const FIND_DAEMON_PIDS =
   'for p in /proc/[0-9]*; do ' +
+  '[ "${p##*/}" = "$$" ] && continue; ' +
   'c=$(tr "\\0" " " < "$p/cmdline" 2>/dev/null || true); ' +
-  'case "$c" in *"df-su --daemon"*) echo "${p##*/}";; esac; ' +
+  `case "$c" in "${DAEMON_BIN} --daemon"*) echo "\${p##*/}";; esac; ` +
   'done';
 
 export function parsePackagesList(content: string): {
@@ -137,7 +138,7 @@ export class RootService {
       const installRes = await this.docker.execInContainer(instance.containerId, [
         'sh',
         '-c',
-        `mkdir -p /system/xbin && chmod 0755 /system/xbin && cp ${DAEMON_BIN} /system/bin/su && cp ${DAEMON_BIN} /system/xbin/su && chown 0:0 /system/bin/su /system/xbin/su && chmod 0755 /system/bin/su /system/xbin/su`,
+        `mkdir -p /system/xbin && chmod 0755 /system/xbin && rm -f /system/bin/su /system/xbin/su && cp ${DAEMON_BIN} /system/bin/su && cp ${DAEMON_BIN} /system/xbin/su && chown 0:0 /system/bin/su /system/xbin/su && chmod 0755 /system/bin/su /system/xbin/su`,
       ]);
       if (installRes.exitCode !== 0) {
         throw new Error(installRes.stderr.trim() || 'Failed to install su binary in Redroid container');
@@ -150,6 +151,7 @@ export class RootService {
       ]);
       if (!daemonCheck.stdout.includes('RUNNING')) {
         await this.docker.execInContainer(instance.containerId, [DAEMON_BIN, '--daemon'], { detach: true });
+        await new Promise((r) => setTimeout(r, 150));
       }
     } else {
       await this.docker.execInContainer(instance.containerId, [

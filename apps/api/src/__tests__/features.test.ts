@@ -378,8 +378,7 @@ describe('Root access policy, API & live toggle', () => {
       }
       if (joined.includes('cp /data/adb/droidforge/df-su /system/bin/su')) {
         rootOn = true;
-      }
-      if (joined.includes('rm -f /system/bin/su /system/xbin/su')) {
+      } else if (joined.includes('rm -f /system/bin/su /system/xbin/su')) {
         rootOn = false;
       }
       if (joined === 'sh -c id') {
