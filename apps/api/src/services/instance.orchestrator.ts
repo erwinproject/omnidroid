@@ -26,6 +26,7 @@ import type { StateStore } from '../db/database.js';
 import type { RedroidDockerManager } from '../docker/redroid-docker.manager.js';
 import type { AdbExecutor } from './adb.service.js';
 import type { AiSnapshotService } from './ai-snapshot.service.js';
+import type { ChromeService } from './chrome.service.js';
 import type { ProxyRelayService } from './proxy-relay.service.js';
 import type { PruneService } from './prune.service.js';
 import type { RecordingService } from './recording.service.js';
@@ -34,6 +35,8 @@ import type { StealthService } from './stealth.service.js';
 import type { StreamService } from './stream.service.js';
 
 export class InstanceOrchestrator {
+  private readonly bootSetupInFlight = new Map<string, Promise<void>>();
+
   constructor(
     private readonly env: AppEnv,
     private readonly store: StateStore,
@@ -46,6 +49,7 @@ export class InstanceOrchestrator {
     private readonly stream: StreamService,
     private readonly aiSnapshot: AiSnapshotService,
     private readonly root: RootService,
+    private readonly chrome?: ChromeService,
   ) {}
 
   private resolveProfile(input: CreateInstanceInput): DeviceProfile {
@@ -219,9 +223,30 @@ export class InstanceOrchestrator {
     }
     const latest = this.store.getInstance(instance.id) ?? instance;
     await this.root.apply(latest).catch(() => undefined);
+    await this.chrome?.ensureChromeInstalled(latest).catch(() => undefined);
     if (latest.proxyConfig) {
       await this.proxyRelay.applyToAndroid(this.adb, latest, latest.proxyConfig).catch(() => undefined);
     }
+  }
+
+  private runBootCompleteSetupOnce(instance: InstanceRecord): Promise<void> {
+    const inFlight = this.bootSetupInFlight.get(instance.id);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const task = (async () => {
+      await this.applyBootCompleteSetup(instance);
+      const current = this.store.getInstance(instance.id);
+      if (current && current.status !== 'stopped') {
+        this.store.updateInstanceStatus(current.id, 'running');
+      }
+    })().finally(() => {
+      this.bootSetupInFlight.delete(instance.id);
+    });
+
+    this.bootSetupInFlight.set(instance.id, task);
+    return task;
   }
 
   private schedulePostBootSetup(instance: InstanceRecord): void {
@@ -240,8 +265,7 @@ export class InstanceOrchestrator {
         }
         const booted = await this.adb.isBootCompleted(current.adbTarget);
         if (booted) {
-          await this.applyBootCompleteSetup(current);
-          this.store.updateInstanceStatus(current.id, 'running');
+          await this.runBootCompleteSetupOnce(current);
           return;
         }
       }
@@ -703,8 +727,7 @@ export class InstanceOrchestrator {
       if (adbConnected) {
         bootCompleted = await this.adb.isBootCompleted(inst.adbTarget);
         if (bootCompleted && inst.status !== 'running') {
-          await this.applyBootCompleteSetup(inst);
-          this.store.updateInstanceStatus(inst.id, 'running');
+          void this.runBootCompleteSetupOnce(inst);
         }
       }
     }

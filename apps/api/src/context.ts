@@ -3,6 +3,7 @@ import type { StateStore } from './db/database.js';
 import type { RedroidDockerManager } from './docker/redroid-docker.manager.js';
 import type { AdbExecutor } from './services/adb.service.js';
 import type { AiSnapshotService } from './services/ai-snapshot.service.js';
+import type { ChromeService } from './services/chrome.service.js';
 import type { H264StreamService } from './services/h264-stream.service.js';
 import type { InputService } from './services/input.service.js';
 import type { InstanceOrchestrator } from './services/instance.orchestrator.js';
@@ -19,6 +20,7 @@ export interface AppContext {
   store: StateStore;
   docker: RedroidDockerManager;
   adb: AdbExecutor;
+  chrome: ChromeService;
   stealth: StealthService;
   proxyRelay: ProxyRelayService;
   recordings: RecordingService;

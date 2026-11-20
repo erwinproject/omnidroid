@@ -413,7 +413,7 @@ export const InspectorPanel: React.FC<Props> = ({
                     <div>
                       <dt className="text-xs font-semibold text-[var(--ink-muted)]">Play Store (GApps)</dt>
                       <dd className="font-bold text-[var(--ink)]">
-                        {instance.enablePlayStore ? 'Enabled (MindTheGapps)' : 'AOSP Only'}
+                        {instance.enablePlayStore ? 'Enabled (MindTheGapps + Chrome)' : 'AOSP + Auto Chrome'}
                       </dd>
                     </div>
                     <div>

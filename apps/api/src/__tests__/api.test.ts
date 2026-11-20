@@ -23,6 +23,7 @@ import {
 } from '../docker/redroid-docker.manager.js';
 import type { AdbExecutor } from '../services/adb.service.js';
 import { extractInteractiveElements } from '../services/ai-snapshot.service.js';
+import { ChromeService, selectChromeApkTarget } from '../services/chrome.service.js';
 import { ProxyRelayService } from '../services/proxy-relay.service.js';
 import { matchSelector, parseUiHierarchyXml } from '../services/ui-automation.service.js';
 
@@ -136,6 +137,12 @@ async function createMockAdb(stealthed = true): Promise<AdbExecutor> {
       }
       if (cmd === 'dumpsys battery') {
         return { exitCode: 0, stdout: 'Current Battery Service state:\n  USB powered: false\n  level: 74\n', stderr: '' };
+      }
+      if (cmd.includes('pm path com.android.chrome')) {
+        return { exitCode: 0, stdout: 'package:/system/product/app/Chrome/Chrome.apk', stderr: '' };
+      }
+      if (cmd.includes('pm path com.android.vending')) {
+        return { exitCode: 0, stdout: 'package:/system/product/priv-app/Phonesky/Phonesky.apk', stderr: '' };
       }
       return { exitCode: 0, stdout: 'OK', stderr: '' };
     }),
@@ -1536,14 +1543,14 @@ describe('Latest Device Presets, Android 15/16 Images & Custom Profile CRUD', ()
     expect(images.find((i) => i.androidVersion === '15')).toMatchObject({
       baseImage: 'redroid/redroid:15.0.0-latest',
       baseInstalled: true,
-      playStoreSupported: false,
-      buildCommand: '',
+      playStoreSupported: true,
+      buildCommand: 'bash scripts/build-playstore-image.sh 15',
     });
     expect(images.find((i) => i.androidVersion === '16')).toMatchObject({
       baseImage: 'redroid/redroid:16.0.0-latest',
       baseInstalled: true,
-      playStoreSupported: false,
-      buildCommand: '',
+      playStoreSupported: true,
+      buildCommand: 'bash scripts/build-playstore-image.sh 16',
     });
 
     const { app } = await buildApp({ env, docker: createMockDocker(), adb: await createMockAdb(true) });
@@ -1661,6 +1668,111 @@ describe('Latest Device Presets, Android 15/16 Images & Custom Profile CRUD', ()
       expect(getDeleted.statusCode).toBe(404);
     } finally {
       await app.close();
+    }
+  });
+
+  it('selects Chrome APK by ABI, detects built-in Chrome, provisions cached APK when absent, and reports chromeInstalled in device/info', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'droidforge-chrome-'));
+    try {
+      const env = loadEnv({ NODE_ENV: 'production', REQUIRE_AUTH: 'false', DATA_DIR: tempDir, AUTO_INSTALL_CHROME: 'true' });
+
+      expect(selectChromeApkTarget('x86_64,x86,arm64-v8a', env)).toMatchObject({
+        arch: 'x86',
+        installAbi: 'x86',
+      });
+      expect(selectChromeApkTarget('arm64-v8a,armeabi-v7a', env).arch).toBe('arm64');
+      expect(selectChromeApkTarget('arm64-v8a,armeabi-v7a', env).installAbi).toBeUndefined();
+
+      const builtinAdb = await createMockAdb(true);
+      const builtinChrome = new ChromeService(env, builtinAdb);
+      const fakeInstance = { id: 'inst-1', adbTarget: 'redroid-inst1:5555' } as unknown as Parameters<
+        ChromeService['ensureChromeInstalled']
+      >[0];
+      const builtinRes = await builtinChrome.ensureChromeInstalled(fakeInstance);
+      expect(builtinRes).toEqual({ installed: true, source: 'builtin' });
+      expect(builtinAdb.installApk).not.toHaveBeenCalled();
+
+      // Test baked-in preinstalled Chrome APK (/system/product/etc/preinstall/Chrome.apk)
+      let preinstalledInstalled = false;
+      const preinstalledAdb: AdbExecutor = {
+        ...(await createMockAdb(true)),
+        shell: vi.fn().mockImplementation(async (_t: string, cmd: string) => {
+          if (cmd.includes('pm path com.android.chrome')) {
+            return {
+              exitCode: 0,
+              stdout: preinstalledInstalled ? 'package:/data/app/com.android.chrome/base.apk' : '',
+              stderr: '',
+            };
+          }
+          if (cmd.includes('test -f /system/product/etc/preinstall/Chrome.apk')) {
+            return { exitCode: 0, stdout: 'yes', stderr: '' };
+          }
+          if (cmd.includes('pm install -r -g --abi x86 /system/product/etc/preinstall/Chrome.apk')) {
+            preinstalledInstalled = true;
+            return { exitCode: 0, stdout: 'Success', stderr: '' };
+          }
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }),
+        installApk: vi.fn(),
+      };
+      const preinstalledChrome = new ChromeService(env, preinstalledAdb);
+      const preinstalledRes = await preinstalledChrome.ensureChromeInstalled(fakeInstance);
+      expect(preinstalledRes).toEqual({ installed: true, source: 'builtin', detail: 'Success' });
+      expect(preinstalledAdb.installApk).not.toHaveBeenCalled();
+
+      // Pre-populate cached x86 Chrome APK (> 10MB + ZIP header PK\x03\x04) and test provisioning when absent
+      const cacheDir = path.join(tempDir, 'cache');
+      fs.mkdirSync(cacheDir, { recursive: true });
+      const target = selectChromeApkTarget('x86_64,x86', env);
+      const cachedApkPath = path.join(cacheDir, target.fileName);
+      const dummyApk = Buffer.alloc(10 * 1024 * 1024 + 64, 0);
+      Buffer.from([0x50, 0x4b, 0x03, 0x04]).copy(dummyApk, 0);
+      fs.writeFileSync(cachedApkPath, dummyApk);
+
+      const missingAdb: AdbExecutor = {
+        ...(await createMockAdb(true)),
+        shell: vi.fn().mockImplementation(async (_t: string, cmd: string) => {
+          if (cmd.includes('pm path com.android.chrome')) return { exitCode: 0, stdout: '', stderr: '' };
+          if (cmd.includes('test -f /system/product/etc/preinstall/Chrome.apk')) return { exitCode: 0, stdout: '', stderr: '' };
+          if (cmd.includes('ro.product.cpu.abilist')) return { exitCode: 0, stdout: 'x86_64,x86,arm64-v8a', stderr: '' };
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }),
+        installApk: vi.fn().mockResolvedValue({ exitCode: 0, stdout: 'Success', stderr: '' }),
+      };
+      const provisionChrome = new ChromeService(env, missingAdb);
+      const provisionRes = await provisionChrome.ensureChromeInstalled(fakeInstance);
+      expect(provisionRes).toMatchObject({ installed: true, source: 'provisioned' });
+      expect(missingAdb.installApk).toHaveBeenCalledWith('redroid-inst1:5555', cachedApkPath, {
+        grantPermissions: true,
+        reinstall: true,
+        abi: 'x86',
+      });
+
+      // Test device/info endpoint exposes chromeInstalled & playStoreInstalled
+      const testEnv = loadEnv({ NODE_ENV: 'test', REQUIRE_AUTH: 'false' });
+      const { app } = await buildApp({ env: testEnv, docker: createMockDocker(), adb: await createMockAdb(true) });
+      try {
+        const created = await app.inject({
+          method: 'POST',
+          url: '/api/v1/instances',
+          payload: { name: 'chrome-info-check', androidVersion: '16', enablePlayStore: true, autoStart: false },
+        });
+        expect(created.statusCode).toBe(201);
+        expect(created.json().image).toBe('droidforge/redroid:16.0.0-playstore');
+        const infoRes = await app.inject({
+          method: 'GET',
+          url: `/api/v1/instances/${created.json().id}/device/info`,
+        });
+        expect(infoRes.statusCode).toBe(200);
+        expect(infoRes.json()).toMatchObject({
+          playStoreInstalled: true,
+          chromeInstalled: true,
+        });
+      } finally {
+        await app.close();
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
 });

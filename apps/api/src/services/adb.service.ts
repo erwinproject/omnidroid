@@ -18,7 +18,7 @@ export interface AdbExecutor {
   shell(target: string, command: string, timeoutMs?: number): Promise<ShellResult>;
   execOut(target: string, args: string[], timeoutMs?: number): Promise<Buffer>;
   screencapPng(target: string): Promise<Buffer>;
-  installApk(target: string, apkPath: string, options?: { grantPermissions?: boolean; reinstall?: boolean }): Promise<ShellResult>;
+  installApk(target: string, apkPath: string, options?: { grantPermissions?: boolean; reinstall?: boolean; abi?: string }): Promise<ShellResult>;
   pushFile(target: string, localPath: string, remotePath: string): Promise<ShellResult>;
   pullFile(target: string, remotePath: string, localPath: string): Promise<ShellResult>;
   isBootCompleted(target: string): Promise<boolean>;
@@ -110,11 +110,12 @@ export class AdbService implements AdbExecutor {
   async installApk(
     target: string,
     apkPath: string,
-    options?: { grantPermissions?: boolean; reinstall?: boolean },
+    options?: { grantPermissions?: boolean; reinstall?: boolean; abi?: string },
   ): Promise<ShellResult> {
     const flags: string[] = [];
     if (options?.reinstall !== false) flags.push('-r');
     if (options?.grantPermissions !== false) flags.push('-g');
+    if (options?.abi) flags.push('--abi', options.abi);
     return this.runAdb(['-s', target, 'install', ...flags, apkPath], 120000);
   }
 

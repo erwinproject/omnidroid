@@ -222,7 +222,7 @@ export class RedroidDockerManager {
         isPlayStoreSupportedAndroidVersion(ver as AndroidVersion);
       const message = supported
         ? `Play Store image "${image}" is not built locally yet. Run: bash scripts/build-playstore-image.sh ${ver}`
-        : `MindTheGapps Play Store image "${image}" is not supported for Android ${ver} (only Android 12, 13, and 14 are supported by scripts/build-playstore-image.sh). Disable Play Store to use the AOSP base image or provide a customImage.`;
+        : `MindTheGapps Play Store image "${image}" is not supported for Android ${ver} (Android 12, 13, 14, 15, and 16 are supported by scripts/build-playstore-image.sh). Disable Play Store to use the AOSP base image or provide a customImage.`;
       const err = new Error(message) as Error & { statusCode?: number };
       err.statusCode = 400;
       throw err;

@@ -22,6 +22,7 @@ import { registerSystemRoutes } from './routes/system.routes.js';
 import { registerUiRoutes } from './routes/ui.routes.js';
 import { AdbService, type AdbExecutor } from './services/adb.service.js';
 import { AiSnapshotService } from './services/ai-snapshot.service.js';
+import { ChromeService } from './services/chrome.service.js';
 import { H264StreamService } from './services/h264-stream.service.js';
 import { InputService } from './services/input.service.js';
 import { InstanceOrchestrator } from './services/instance.orchestrator.js';
@@ -50,6 +51,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
   const store = options.store ?? new StateStore(dbPath);
   const docker = options.docker ?? new RedroidDockerManager(env);
   const adb = options.adb ?? new AdbService(env.ADB_BIN);
+  const chrome = new ChromeService(env, adb);
   const stealth = new StealthService(adb);
   const proxyRelay = new ProxyRelayService(env);
   const recordings = new RecordingService(env);
@@ -73,6 +75,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
     stream,
     aiSnapshot,
     root,
+    chrome,
   );
 
   const ctx: AppContext = {
@@ -80,6 +83,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
     store,
     docker,
     adb,
+    chrome,
     stealth,
     proxyRelay,
     recordings,

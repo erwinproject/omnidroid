@@ -37,6 +37,16 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v === undefined ? true : v !== 'false')),
+  AUTO_INSTALL_CHROME: z
+    .string()
+    .optional()
+    .transform((v) => (v === undefined ? true : v !== 'false')),
+  CHROME_APK_URL_X86: z
+    .string()
+    .default('https://github.com/JonaNorman/WebViewPackage/releases/download/chrome/136.0.7103.125_min26_x86.apk'),
+  CHROME_APK_URL_ARM64: z
+    .string()
+    .default('https://github.com/JonaNorman/WebViewPackage/releases/download/chrome/136.0.7103.125_min26_arm32+64.apk'),
 });
 
 export type AppEnv = z.infer<typeof EnvSchema>;

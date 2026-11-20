@@ -19,8 +19,11 @@ sudo bash scripts/setup-linux-host.sh
 # 2. Konfigurasi environment & API Key
 cp .env.example .env
 
-# 3. (Opsional) Build image Redroid + Google Play Store (Android 12 / 13 / 14)
-bash scripts/build-playstore-image.sh 13
+# 3. (Opsional) Build image Redroid + Google Play Store + Built-in Chrome (Android 12 / 13 / 14 / 15 / 16)
+bash scripts/build-playstore-image.sh 15
+bash scripts/build-playstore-image.sh 16
+# atau bangun semua versi sekaligus:
+# bash scripts/build-playstore-image.sh all
 
 # 4. Jalankan seluruh stack
 docker compose up -d --build

@@ -16,16 +16,18 @@ export function registerDeviceRoutes(app: FastifyInstance, ctx: AppContext): voi
   app.get('/api/v1/instances/:id/device/info', { schema: { tags: ['Device'], summary: 'Get system properties, foreground activity, and battery info' } }, async (req) => {
     const { id } = req.params as { id: string };
     const inst = ctx.orchestrator.requireInstance(id);
-    const [propRes, focusRes, batRes, vendingRes] = await Promise.all([
+    const [propRes, focusRes, batRes, vendingRes, chromeRes] = await Promise.all([
       ctx.adb.shell(inst.adbTarget, 'getprop'),
       ctx.adb.shell(inst.adbTarget, 'dumpsys window | grep -E "mCurrentFocus|mFocusedApp" | head -n 2'),
       ctx.adb.shell(inst.adbTarget, 'dumpsys battery'),
       ctx.adb.shell(inst.adbTarget, 'pm path com.android.vending 2>/dev/null || true'),
+      ctx.adb.shell(inst.adbTarget, 'pm path com.android.chrome 2>/dev/null || true'),
     ]);
 
     const props = parseGetProp(propRes.stdout);
     const batteryLevel = Number(batRes.stdout.match(/level:\s*(\d+)/i)?.[1] ?? -1);
     const playStoreInstalled = vendingRes.stdout.includes('package:');
+    const chromeInstalled = chromeRes.stdout.includes('package:');
 
     return {
       instanceId: inst.id,
@@ -39,6 +41,7 @@ export function registerDeviceRoutes(app: FastifyInstance, ctx: AppContext): voi
       fingerprint: props['ro.build.fingerprint'] ?? inst.profile.buildFingerprint,
       abiList: props['ro.product.cpu.abilist'] ?? '',
       playStoreInstalled,
+      chromeInstalled,
       foreground: focusRes.stdout,
       batteryLevel,
     };

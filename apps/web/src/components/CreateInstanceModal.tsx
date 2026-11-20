@@ -724,17 +724,16 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                 </div>
                 {!playStoreSupported ? (
                   <p className="text-xs text-[var(--ink-muted)]">
-                    Play Store MindTheGapps overlay is supported on Android 12, 13, and 14. Android {androidVersion} boots AOSP{' '}
-                    <code>redroid/redroid:{androidVersion}.0.0-latest</code> unless a Custom Redroid Image is specified.
+                    Play Store MindTheGapps overlay is supported on Android 12, 13, 14, 15, and 16. Android {androidVersion} boots AOSP with auto-installed Chrome unless a Custom Redroid Image is specified.
                   </p>
                 ) : selectedImageStatus && !selectedImageStatus.playStoreInstalled ? (
                   <div className="border-2 border-[var(--border)] bg-[var(--status-warn-bg)] p-2 text-xs font-semibold text-[var(--status-warn-ink)]">
-                    Build Play Store image on server first:{' '}
+                    Build Play Store + Chrome image on server first:{' '}
                     <code>{selectedImageStatus.buildCommand}</code>
                   </div>
                 ) : (
                   <p className="text-xs text-[var(--ink-muted)]">
-                    Boots {selectedImageStatus?.playStoreImage ?? `droidforge/redroid:${androidVersion}.0.0-playstore`} with Google Play Store and ARM translation.
+                    Boots {selectedImageStatus?.playStoreImage ?? `droidforge/redroid:${androidVersion}.0.0-playstore`} with Google Play Store, GMS, built-in Google Chrome, and ARM translation.
                   </p>
                 )}
               </div>
