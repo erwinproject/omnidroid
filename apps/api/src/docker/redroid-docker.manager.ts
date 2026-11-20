@@ -2,7 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PassThrough, Readable } from 'node:stream';
 import Docker from 'dockerode';
-import type { DeviceProfile, InstanceRecord, SystemImageStatus } from '@droidforge/shared';
+import {
+  isPlayStoreSupportedAndroidVersion,
+  type AndroidVersion,
+  type DeviceProfile,
+  type InstanceRecord,
+  type SystemImageStatus,
+} from '@droidforge/shared';
 import type { AppEnv } from '../config/env.js';
 
 export interface ContainerStatsResult {
@@ -211,9 +217,13 @@ export class RedroidDockerManager {
     ) {
       const verMatch = image.match(/:(\d+)\./);
       const ver = verMatch?.[1] ?? '13';
-      const err = new Error(
-        `Play Store image "${image}" is not built locally yet. Run: bash scripts/build-playstore-image.sh ${ver}`,
-      ) as Error & { statusCode?: number };
+      const supported =
+        (['11', '12', '13', '14', '15', '16'] as readonly string[]).includes(ver) &&
+        isPlayStoreSupportedAndroidVersion(ver as AndroidVersion);
+      const message = supported
+        ? `Play Store image "${image}" is not built locally yet. Run: bash scripts/build-playstore-image.sh ${ver}`
+        : `MindTheGapps Play Store image "${image}" is not supported for Android ${ver} (only Android 12, 13, and 14 are supported by scripts/build-playstore-image.sh). Disable Play Store to use the AOSP base image or provide a customImage.`;
+      const err = new Error(message) as Error & { statusCode?: number };
       err.statusCode = 400;
       throw err;
     }
@@ -228,7 +238,7 @@ export class RedroidDockerManager {
   }
 
   async getSystemImages(): Promise<SystemImageStatus[]> {
-    const versions: Array<'11' | '12' | '13' | '14'> = ['11', '12', '13', '14'];
+    const versions: AndroidVersion[] = ['11', '12', '13', '14', '15', '16'];
     let imagesList: Array<{ RepoTags?: string[]; Size?: number }> = [];
     try {
       imagesList = (await this.docker.listImages()) as Array<{ RepoTags?: string[]; Size?: number }>;
@@ -244,14 +254,16 @@ export class RedroidDockerManager {
       const playStoreImage = `${this.env.REDROID_PLAYSTORE_IMAGE_REPO}:${v}.0.0-playstore`;
       const baseFound = findImage(baseImage);
       const playFound = findImage(playStoreImage);
+      const playStoreSupported = isPlayStoreSupportedAndroidVersion(v);
       return {
         androidVersion: v,
         baseImage,
         baseInstalled: Boolean(baseFound),
         playStoreImage,
+        playStoreSupported,
         playStoreInstalled: Boolean(playFound),
         playStoreSizeMb: playFound?.Size ? Math.round(playFound.Size / (1024 * 1024)) : null,
-        buildCommand: `bash scripts/build-playstore-image.sh ${v}`,
+        buildCommand: playStoreSupported ? `bash scripts/build-playstore-image.sh ${v}` : '',
       };
     });
   }

@@ -14,6 +14,7 @@ import {
   RotateCcw,
   Shield,
   SlidersHorizontal,
+  Smartphone,
   Square,
   Store,
   Sun,
@@ -23,6 +24,7 @@ import {
 import { createClient, getApiKey } from './api/client';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { CreateInstanceModal } from './components/CreateInstanceModal';
+import { DevicePresetsModal } from './components/DevicePresetsModal';
 import { EditInstanceModal } from './components/EditInstanceModal';
 import { DroidForgeMark } from './components/DroidForgeMark';
 import { InspectorPanel } from './components/InspectorPanel';
@@ -59,6 +61,7 @@ export const App: React.FC = () => {
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editInstance, setEditInstance] = useState<InstanceRecord | null>(null);
+  const [presetsModalOpen, setPresetsModalOpen] = useState(false);
   const [pruneModalOpen, setPruneModalOpen] = useState(false);
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(() => Boolean(getApiKey()));
@@ -520,6 +523,16 @@ export const App: React.FC = () => {
 
           <button
             type="button"
+            onClick={() => setPresetsModalOpen(true)}
+            aria-label="Manage device presets"
+            className="nb-btn nb-btn-secondary px-2.5 sm:px-3"
+          >
+            <Smartphone className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="hidden sm:inline">Presets</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setPruneModalOpen(true)}
             aria-label="Prune unused storage"
             className="nb-btn nb-btn-secondary px-2.5 sm:px-3"
@@ -746,6 +759,8 @@ export const App: React.FC = () => {
       />
 
       <EditInstanceModal instance={editInstance} onClose={() => setEditInstance(null)} onSaved={() => void refresh(false)} />
+
+      <DevicePresetsModal open={presetsModalOpen} onClose={() => setPresetsModalOpen(false)} />
 
       <PruneModal
         open={pruneModalOpen}

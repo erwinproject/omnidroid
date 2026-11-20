@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import type { DeviceProfile, InstanceRecord, UpdateInstanceInput } from '@droidforge/shared';
 import { RotateCcw, X, Zap } from 'lucide-react';
 import { createClient } from '../api/client';
+import { formatPresetOptionLabel, groupDeviceProfiles } from '../lib/presets';
 
 interface Props {
   instance: InstanceRecord | null;
@@ -226,11 +227,17 @@ export const EditInstanceModal: React.FC<Props> = ({ instance, onClose, onSaved 
                 Device Preset
               </label>
               <select id="edit-preset" value={profileId} onChange={(e) => applyPreset(e.target.value)} className="nb-input">
-                {profiles.length === 0 && <option value={profileId}>{profileId}</option>}
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.brand} / {p.model})
-                  </option>
+                {(profiles.length === 0 || !profiles.some((p) => p.id === profileId)) && (
+                  <option value={profileId}>{profileId}</option>
+                )}
+                {groupDeviceProfiles(profiles).map((group) => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {formatPresetOptionLabel(p)}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
             </div>

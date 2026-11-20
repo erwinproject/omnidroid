@@ -85,14 +85,19 @@ export class EmulatorApiClient {
 
   readonly profiles = {
     list: () => this.request<DeviceProfile[]>('/api/v1/profiles'),
-    get: (id: string) => this.request<DeviceProfile>(`/api/v1/profiles/${id}`),
+    get: (id: string) => this.request<DeviceProfile>(`/api/v1/profiles/${encodeURIComponent(id)}`),
     create: (input: CreateDeviceProfileInput) =>
       this.request<DeviceProfile>('/api/v1/profiles', {
         method: 'POST',
         body: JSON.stringify(input),
       }),
+    update: (id: string, input: CreateDeviceProfileInput) =>
+      this.request<DeviceProfile>(`/api/v1/profiles/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      }),
     delete: (id: string) =>
-      this.request<{ deleted: boolean }>(`/api/v1/profiles/${id}`, { method: 'DELETE' }),
+      this.request<{ deleted: boolean }>(`/api/v1/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     generateIdentity: (macOui?: string) =>
       this.request<GeneratedIdentity>('/api/v1/profiles/generate-identity', {
         method: 'POST',

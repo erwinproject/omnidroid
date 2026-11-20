@@ -1,7 +1,20 @@
 import { z } from 'zod';
+import {
+  AndroidVersionSchema,
+  PLAYSTORE_SUPPORTED_ANDROID_VERSIONS,
+  isPlayStoreSupportedAndroidVersion,
+  type AndroidVersion,
+} from './android.schema.js';
 import { RootConfigSchema } from './device.schema.js';
 import { DeviceProfileOverrideSchema, DeviceProfileSchema } from './profile.schema.js';
 import { ProxyConfigSchema } from './proxy.schema.js';
+
+export {
+  AndroidVersionSchema,
+  PLAYSTORE_SUPPORTED_ANDROID_VERSIONS,
+  isPlayStoreSupportedAndroidVersion,
+  type AndroidVersion,
+};
 
 export const InstanceStatusSchema = z.enum([
   'creating',
@@ -10,8 +23,6 @@ export const InstanceStatusSchema = z.enum([
   'stopped',
   'error',
 ]);
-
-export const AndroidVersionSchema = z.enum(['11', '12', '13', '14']);
 
 export const CreateInstanceSchema = z.object({
   name: z.string().min(2).max(64).regex(/^[a-zA-Z0-9_-]+$/),

@@ -1,6 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import {
+  extractFingerprintAndroidVersion,
+  isPlayStoreSupportedAndroidVersion,
   parseProxyString,
+  type AndroidVersion,
+  type CreateDeviceProfileInput,
   type CreateInstanceInput,
   type DeviceProfile,
   type ProxyProfile,
@@ -8,8 +12,9 @@ import {
   type ProxyTestResult,
   type SystemImageStatus,
 } from '@droidforge/shared';
-import { Globe, RefreshCw, ShieldCheck, Shuffle, Store, X, Zap } from 'lucide-react';
+import { BookmarkPlus, Globe, RefreshCw, ShieldCheck, Shuffle, Store, X, Zap } from 'lucide-react';
 import { createClient } from '../api/client';
+import { formatPresetOptionLabel, groupDeviceProfiles } from '../lib/presets';
 
 interface Props {
   open: boolean;
@@ -23,8 +28,12 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   const [randomizing, setRandomizing] = useState(false);
 
   const [name, setName] = useState(`android-${Math.floor(1000 + Math.random() * 9000)}`);
-  const [androidVersion, setAndroidVersion] = useState<'11' | '12' | '13' | '14'>('13');
+  const [androidVersion, setAndroidVersion] = useState<AndroidVersion>('13');
   const [profileId, setProfileId] = useState('pixel-8-pro');
+  const [savePresetOpen, setSavePresetOpen] = useState(false);
+  const [savePresetName, setSavePresetName] = useState('');
+  const [savingPreset, setSavingPreset] = useState(false);
+  const [savePresetNotice, setSavePresetNotice] = useState<string | null>(null);
   const [stealthMode, setStealthMode] = useState(true);
   const [enablePlayStore, setEnablePlayStore] = useState(false);
   const [enableRoot, setEnableRoot] = useState(false);
@@ -76,9 +85,11 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
           setProxyProfileId(proxies[0].id);
         }
         if (!playStoreTouched) {
-          const img13 = imgs.find((i) => i.androidVersion === '13');
-          if (img13?.playStoreInstalled) {
-            setEnablePlayStore(true);
+          if (!isPlayStoreSupportedAndroidVersion(androidVersion)) {
+            setEnablePlayStore(false);
+          } else {
+            const img = imgs.find((i) => i.androidVersion === androidVersion);
+            setEnablePlayStore(Boolean(img?.playStoreInstalled));
           }
         }
       })
@@ -88,17 +99,87 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
 
   useEffect(() => {
     if (!open) return;
+    setSavePresetOpen(false);
+    setSavePresetNotice(null);
     loadProfiles();
   }, [open]);
 
   useEffect(() => {
     if (!open) return;
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape' && !submitting) onClose();
+      if (e.key === 'Escape' && !submitting && !savingPreset) onClose();
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, submitting, onClose]);
+  }, [open, submitting, savingPreset, onClose]);
+
+  function handleSelectAndroidVersion(nextVer: AndroidVersion) {
+    setAndroidVersion(nextVer);
+    if (!isPlayStoreSupportedAndroidVersion(nextVer)) {
+      setEnablePlayStore(false);
+      return;
+    }
+    if (!playStoreTouched) {
+      const img = systemImages.find((item) => item.androidVersion === nextVer);
+      setEnablePlayStore(Boolean(img?.playStoreInstalled));
+    }
+  }
+
+  async function handleSaveAsPreset() {
+    const trimmedName = savePresetName.trim();
+    if (trimmedName.length < 2) {
+      setError('Enter a custom preset name (at least 2 characters).');
+      return;
+    }
+    const base = profiles.find((p) => p.id === profileId) ?? profiles[0];
+    if (!base) {
+      setError('Base preset is not loaded yet.');
+      return;
+    }
+
+    setSavingPreset(true);
+    setError(null);
+    setSavePresetNotice(null);
+    try {
+      const payload: CreateDeviceProfileInput = {
+        name: trimmedName,
+        brand: brand.trim() || base.brand,
+        manufacturer: manufacturer.trim() || base.manufacturer,
+        model: model.trim() || base.model,
+        device: base.device,
+        product: base.product,
+        hardware: base.hardware,
+        board: base.board,
+        platform: base.platform,
+        buildType,
+        buildTags: buildTags.trim() || base.buildTags,
+        buildId: base.buildId,
+        buildFingerprint: buildFingerprint.trim() || base.buildFingerprint,
+        securityPatch: base.securityPatch,
+        width: base.width,
+        height: base.height,
+        dpi: base.dpi,
+        macOui: base.macOui,
+        locale: base.locale,
+        timezone: timezone.trim() || base.timezone,
+        carrierName: carrierName.trim() || base.carrierName,
+        carrierMccMnc: base.carrierMccMnc,
+        countryIso: base.countryIso,
+      };
+      const client = createClient();
+      const created = await client.profiles.create(payload);
+      const updatedList = await client.profiles.list();
+      setProfiles(updatedList);
+      applyPresetFields(created);
+      setSavePresetOpen(false);
+      setSavePresetName('');
+      setSavePresetNotice(`Saved custom preset "${created.name}".`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSavingPreset(false);
+    }
+  }
 
   function applyPresetFields(p: DeviceProfile) {
     setProfileId(p.id);
@@ -129,6 +210,15 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   }
 
   const selectedImageStatus = systemImages.find((img) => img.androidVersion === androidVersion);
+  const playStoreSupported = isPlayStoreSupportedAndroidVersion(androidVersion);
+  const selectedPreset = profiles.find((p) => p.id === profileId);
+  const groupedProfiles = groupDeviceProfiles(profiles);
+  const presetAndroidVer = extractFingerprintAndroidVersion(buildFingerprint);
+  const validAndroidVersions: readonly AndroidVersion[] = ['11', '12', '13', '14', '15', '16'];
+  const switchablePresetVer =
+    presetAndroidVer && (validAndroidVersions as readonly string[]).includes(presetAndroidVer)
+      ? (presetAndroidVer as AndroidVersion)
+      : null;
 
   async function handleTestCreateProxy() {
     setTestingProxy(true);
@@ -268,20 +358,15 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                 <select
                   id="inst-android"
                   value={androidVersion}
-                  onChange={(e) => {
-                    const nextVer = e.target.value as '11' | '12' | '13' | '14';
-                    setAndroidVersion(nextVer);
-                    if (!playStoreTouched) {
-                      const img = systemImages.find((item) => item.androidVersion === nextVer);
-                      setEnablePlayStore(Boolean(img?.playStoreInstalled));
-                    }
-                  }}
+                  onChange={(e) => handleSelectAndroidVersion(e.target.value as AndroidVersion)}
                   className="nb-input"
                 >
                   <option value="11">Android 11</option>
                   <option value="12">Android 12</option>
                   <option value="13">Android 13 (Recommended)</option>
                   <option value="14">Android 14</option>
+                  <option value="15">Android 15</option>
+                  <option value="16">Android 16 (Latest)</option>
                 </select>
               </div>
             </div>
@@ -304,9 +389,29 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
               </div>
 
               <div>
-                <label htmlFor="inst-preset" className="mb-1.5 block text-[13px] font-bold text-[var(--ink)]">
-                  Device Preset
-                </label>
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                  <label htmlFor="inst-preset" className="block text-[13px] font-bold text-[var(--ink)]">
+                    Device Preset
+                  </label>
+                  <button
+                    type="button"
+                    disabled={profilesLoading || savingPreset}
+                    onClick={() => {
+                      setSavePresetNotice(null);
+                      setSavePresetOpen((prev) => {
+                        const next = !prev;
+                        if (next && !savePresetName.trim()) {
+                          setSavePresetName(`${brand || 'Custom'} ${model || 'Device'} Custom`.trim());
+                        }
+                        return next;
+                      });
+                    }}
+                    className="nb-btn nb-btn-secondary px-2.5 text-xs"
+                  >
+                    <BookmarkPlus className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                    <span>Save as Preset</span>
+                  </button>
+                </div>
                 <select
                   id="inst-preset"
                   disabled={profilesLoading}
@@ -322,13 +427,86 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                   ) : profiles.length === 0 ? (
                     <option value={profileId}>{profileId}</option>
                   ) : (
-                    profiles.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} ({p.brand} / {p.model})
-                      </option>
-                    ))
+                    <>
+                      {!profiles.some((p) => p.id === profileId) && (
+                        <option value={profileId}>{profileId}</option>
+                      )}
+                      {groupedProfiles.map((group) => (
+                        <optgroup key={group.label} label={group.label}>
+                          {group.profiles.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {formatPresetOptionLabel(p)}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </>
                   )}
                 </select>
+
+                {selectedPreset && (
+                  <p className="num mt-1.5 text-xs font-medium text-[var(--ink-muted)]">
+                    {selectedPreset.width}x{selectedPreset.height} @ {selectedPreset.dpi} DPI · Platform: {selectedPreset.platform} · Patch: {selectedPreset.securityPatch}
+                  </p>
+                )}
+
+                {presetAndroidVer && presetAndroidVer !== androidVersion && (
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-2 border-[var(--border)] bg-[var(--status-warn-bg)] px-2.5 py-2 text-xs font-semibold text-[var(--status-warn-ink)]">
+                    <span>
+                      Fingerprint targets Android {presetAndroidVer}, while instance OS is Android {androidVersion}.
+                    </span>
+                    {switchablePresetVer && (
+                      <button
+                        type="button"
+                        onClick={() => handleSelectAndroidVersion(switchablePresetVer)}
+                        className="nb-btn nb-btn-secondary px-2.5 text-xs"
+                      >
+                        Switch to Android {switchablePresetVer}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {savePresetOpen && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 border-2 border-[var(--border)] bg-[var(--bg-surface)] p-2.5">
+                    <input
+                      id="inst-save-preset-name"
+                      value={savePresetName}
+                      onChange={(e) => setSavePresetName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          void handleSaveAsPreset();
+                        }
+                      }}
+                      placeholder="Custom preset name"
+                      aria-label="Custom preset name"
+                      className="nb-input min-w-[180px] flex-1"
+                    />
+                    <button
+                      type="button"
+                      disabled={savingPreset}
+                      onClick={() => void handleSaveAsPreset()}
+                      className="nb-btn nb-btn-primary px-3 text-xs"
+                    >
+                      {savingPreset ? 'Saving...' : 'Save Preset'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingPreset}
+                      onClick={() => setSavePresetOpen(false)}
+                      className="nb-btn nb-btn-secondary px-2.5 text-xs"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                )}
+
+                {savePresetNotice && (
+                  <div className="mt-2 border-2 border-[var(--border)] bg-[var(--status-ok-bg)] px-2.5 py-1.5 text-xs font-semibold text-[var(--status-ok-ink)]">
+                    {savePresetNotice}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -514,7 +692,7 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                     <input
                       type="checkbox"
                       checked={enablePlayStore}
-                      disabled={androidVersion === '11'}
+                      disabled={!playStoreSupported}
                       onChange={(e) => {
                         setPlayStoreTouched(true);
                         setEnablePlayStore(e.target.checked);
@@ -524,23 +702,30 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                     <Store className="h-4 w-4 shrink-0" aria-hidden="true" />
                     <span>Google Play Store + GMS (MindTheGapps)</span>
                   </label>
-                  {selectedImageStatus && (
-                    <span
-                      className={`num border-2 border-[var(--border)] px-2 py-0.5 text-xs font-extrabold uppercase ${
-                        selectedImageStatus.playStoreInstalled
-                          ? 'bg-[var(--status-ok-bg)] text-[var(--status-ok-ink)]'
-                          : 'bg-[var(--status-warn-bg)] text-[var(--status-warn-ink)]'
-                      }`}
-                    >
-                      {selectedImageStatus.playStoreInstalled
-                        ? `Built (${selectedImageStatus.playStoreSizeMb ?? '?'} MB)`
-                        : 'Not Built'}
+                  {!playStoreSupported ? (
+                    <span className="num border-2 border-[var(--border)] bg-[var(--status-idle-bg)] px-2 py-0.5 text-xs font-extrabold uppercase text-[var(--status-idle-ink)]">
+                      Not Available
                     </span>
+                  ) : (
+                    selectedImageStatus && (
+                      <span
+                        className={`num border-2 border-[var(--border)] px-2 py-0.5 text-xs font-extrabold uppercase ${
+                          selectedImageStatus.playStoreInstalled
+                            ? 'bg-[var(--status-ok-bg)] text-[var(--status-ok-ink)]'
+                            : 'bg-[var(--status-warn-bg)] text-[var(--status-warn-ink)]'
+                        }`}
+                      >
+                        {selectedImageStatus.playStoreInstalled
+                          ? `Built (${selectedImageStatus.playStoreSizeMb ?? '?'} MB)`
+                          : 'Not Built'}
+                      </span>
+                    )
                   )}
                 </div>
-                {androidVersion === '11' ? (
+                {!playStoreSupported ? (
                   <p className="text-xs text-[var(--ink-muted)]">
-                    Play Store MindTheGapps overlay is supported on Android 12, 13, and 14.
+                    Play Store MindTheGapps overlay is supported on Android 12, 13, and 14. Android {androidVersion} boots AOSP{' '}
+                    <code>redroid/redroid:{androidVersion}.0.0-latest</code> unless a Custom Redroid Image is specified.
                   </p>
                 ) : selectedImageStatus && !selectedImageStatus.playStoreInstalled ? (
                   <div className="border-2 border-[var(--border)] bg-[var(--status-warn-bg)] p-2 text-xs font-semibold text-[var(--status-warn-ink)]">

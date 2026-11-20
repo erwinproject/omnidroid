@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AndroidVersionSchema } from './android.schema.js';
 
 export const ProxyProtocolSchema = z.enum(['http', 'https', 'socks5']);
 
@@ -123,10 +124,11 @@ export const InstanceProxyVerifyResultSchema = ProxyTestResultSchema.extend({
 });
 
 export const SystemImageStatusSchema = z.object({
-  androidVersion: z.enum(['11', '12', '13', '14']),
+  androidVersion: AndroidVersionSchema,
   baseImage: z.string(),
   baseInstalled: z.boolean(),
   playStoreImage: z.string(),
+  playStoreSupported: z.boolean().default(true),
   playStoreInstalled: z.boolean(),
   playStoreSizeMb: z.number().nullable(),
   buildCommand: z.string(),

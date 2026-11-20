@@ -35,6 +35,23 @@ export function registerProfileRoutes(app: FastifyInstance, ctx: AppContext): vo
     return reply.code(201).send(profile);
   });
 
+  app.put('/api/v1/profiles/:id', { schema: { tags: ['Profiles'], summary: 'Update an existing custom device profile' } }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const existing = ctx.store.getProfile(id);
+    if (!existing) return reply.code(404).send({ error: `Profile not found: ${id}` });
+    if (existing.isBuiltIn) {
+      return reply.code(409).send({ error: `Cannot modify built-in profile: ${id}` });
+    }
+    const parsed = CreateDeviceProfileSchema.parse(req.body);
+    const profile: DeviceProfile = {
+      ...parsed,
+      id,
+      isBuiltIn: false,
+    };
+    ctx.store.saveProfile(profile);
+    return reply.code(200).send(profile);
+  });
+
   app.delete('/api/v1/profiles/:id', { schema: { tags: ['Profiles'], summary: 'Delete a custom device profile' } }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const existing = ctx.store.getProfile(id);

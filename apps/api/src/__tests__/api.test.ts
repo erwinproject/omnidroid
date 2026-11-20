@@ -6,15 +6,20 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import { describe, expect, it, vi } from 'vitest';
-import { BUILTIN_DEVICE_PROFILES, parseProxyString } from '@droidforge/shared';
+import {
+  BUILTIN_DEVICE_PROFILES,
+  DeviceProfileSchema,
+  extractFingerprintAndroidVersion,
+  parseProxyString,
+} from '@droidforge/shared';
 import { buildApp } from '../app.js';
 import { loadEnv } from '../config/env.js';
 import {
   buildRedroidBootArgs,
+  RedroidDockerManager,
   type DockerContainerSummary,
   type DockerImageSummary,
   type DockerVolumeSummary,
-  type RedroidDockerManager,
 } from '../docker/redroid-docker.manager.js';
 import type { AdbExecutor } from '../services/adb.service.js';
 import { extractInteractiveElements } from '../services/ai-snapshot.service.js';
@@ -1462,6 +1467,200 @@ describe('Storage & Container Prune Subsystem', () => {
     } finally {
       await app.close();
       fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Latest Device Presets, Android 15/16 Images & Custom Profile CRUD', () => {
+  it('validates all built-in device presets including latest 2024-2026 models and fingerprint versions', () => {
+    expect(BUILTIN_DEVICE_PROFILES.length).toBeGreaterThanOrEqual(18);
+    const ids = new Set<string>();
+    const emulatorMarkers = ['redroid', 'goldfish', 'ranchu', 'vbox', 'genymotion', 'nox', 'bluestacks', 'generic_x86'];
+
+    for (const profile of BUILTIN_DEVICE_PROFILES) {
+      const parsed = DeviceProfileSchema.parse(profile);
+      expect(parsed.isBuiltIn).toBe(true);
+      expect(ids.has(parsed.id)).toBe(false);
+      ids.add(parsed.id);
+
+      const combined = `${parsed.brand} ${parsed.model} ${parsed.buildFingerprint}`.toLowerCase();
+      for (const marker of emulatorMarkers) {
+        expect(combined).not.toContain(marker);
+      }
+    }
+
+    const expectedLatestIds = [
+      'pixel-10-pro',
+      'pixel-10-pro-xl',
+      'samsung-s26-ultra',
+      'pixel-9-pro-xl',
+      'samsung-s25-ultra',
+      'samsung-a56-5g',
+      'xiaomi-15',
+      'xiaomi-15-ultra',
+      'oneplus-13',
+      'oppo-find-x8-pro',
+      'vivo-x200-pro',
+      'samsung-s24-ultra',
+      'samsung-a55-5g',
+      'poco-f6',
+    ];
+    for (const id of expectedLatestIds) {
+      expect(ids.has(id)).toBe(true);
+    }
+
+    const getVer = (id: string) =>
+      extractFingerprintAndroidVersion(BUILTIN_DEVICE_PROFILES.find((p) => p.id === id)!.buildFingerprint);
+    expect(getVer('pixel-10-pro')).toBe('16');
+    expect(getVer('samsung-s26-ultra')).toBe('16');
+    expect(getVer('samsung-s25-ultra')).toBe('15');
+    expect(getVer('xiaomi-15')).toBe('15');
+    expect(getVer('samsung-s24-ultra')).toBe('14');
+  });
+
+  it('supports Android 15 and 16 instances and reports Play Store support matrix in getSystemImages()', async () => {
+    const env = loadEnv({ NODE_ENV: 'test', REQUIRE_AUTH: 'false' });
+    const mockDockerClient = {
+      listImages: vi.fn().mockResolvedValue([
+        { RepoTags: ['redroid/redroid:15.0.0-latest'], Size: 1_500_000_000 },
+        { RepoTags: ['redroid/redroid:16.0.0-latest'], Size: 1_600_000_000 },
+      ]),
+    };
+    const realManager = new RedroidDockerManager(env, mockDockerClient as unknown as ConstructorParameters<typeof RedroidDockerManager>[1]);
+    const images = await realManager.getSystemImages();
+    expect(images.map((i) => i.androidVersion)).toEqual(['11', '12', '13', '14', '15', '16']);
+    expect(images.find((i) => i.androidVersion === '11')?.playStoreSupported).toBe(false);
+    expect(images.find((i) => i.androidVersion === '12')?.playStoreSupported).toBe(true);
+    expect(images.find((i) => i.androidVersion === '13')?.playStoreSupported).toBe(true);
+    expect(images.find((i) => i.androidVersion === '14')?.playStoreSupported).toBe(true);
+    expect(images.find((i) => i.androidVersion === '15')).toMatchObject({
+      baseImage: 'redroid/redroid:15.0.0-latest',
+      baseInstalled: true,
+      playStoreSupported: false,
+      buildCommand: '',
+    });
+    expect(images.find((i) => i.androidVersion === '16')).toMatchObject({
+      baseImage: 'redroid/redroid:16.0.0-latest',
+      baseInstalled: true,
+      playStoreSupported: false,
+      buildCommand: '',
+    });
+
+    const { app } = await buildApp({ env, docker: createMockDocker(), adb: await createMockAdb(true) });
+    try {
+      const a15 = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: {
+          name: 'android15-s25u',
+          androidVersion: '15',
+          profileId: 'samsung-s25-ultra',
+          autoStart: false,
+        },
+      });
+      expect(a15.statusCode).toBe(201);
+      expect(a15.json().androidVersion).toBe('15');
+      expect(a15.json().image).toBe('redroid/redroid:15.0.0-latest');
+      expect(a15.json().profile.model).toBe('SM-S938B');
+
+      const a16 = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: {
+          name: 'android16-p10p',
+          androidVersion: '16',
+          profileId: 'pixel-10-pro',
+          autoStart: false,
+        },
+      });
+      expect(a16.statusCode).toBe(201);
+      expect(a16.json().androidVersion).toBe('16');
+      expect(a16.json().image).toBe('redroid/redroid:16.0.0-latest');
+      expect(a16.json().profile.model).toBe('Pixel 10 Pro');
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('supports Custom Device Profile CRUD (POST, GET, PUT, DELETE) and protects built-in presets', async () => {
+    const env = loadEnv({ NODE_ENV: 'test', REQUIRE_AUTH: 'false' });
+    const { app } = await buildApp({ env, docker: createMockDocker(), adb: await createMockAdb(true) });
+
+    try {
+      const createdRes = await app.inject({
+        method: 'POST',
+        url: '/api/v1/profiles',
+        payload: {
+          name: 'Custom Galaxy S26 Ultra Lab',
+          brand: 'samsung',
+          manufacturer: 'samsung',
+          model: 'SM-S948B',
+          device: 'm3q',
+          product: 'm3qxxx',
+          hardware: 'qcom',
+          board: 'canoe',
+          platform: 'canoe',
+          buildType: 'user',
+          buildTags: 'release-keys',
+          buildId: 'BP2A.250605.031.A3',
+          buildFingerprint: 'samsung/m3qxxx/m3q:16/BP2A.250605.031.A3/S948BXXU1AZB4:user/release-keys',
+          securityPatch: '2026-02-01',
+          width: 1080,
+          height: 2340,
+          dpi: 450,
+          macOui: '8C:F5:A3',
+          locale: 'id-ID',
+          timezone: 'Asia/Jakarta',
+          carrierName: 'Telkomsel',
+          carrierMccMnc: '51010',
+          countryIso: 'id',
+        },
+      });
+      expect(createdRes.statusCode).toBe(201);
+      const created = createdRes.json();
+      expect(created.isBuiltIn).toBe(false);
+      expect(created.name).toBe('Custom Galaxy S26 Ultra Lab');
+
+      const listRes = await app.inject({ method: 'GET', url: '/api/v1/profiles' });
+      expect(listRes.statusCode).toBe(200);
+      expect(listRes.json().some((p: { id: string; isBuiltIn: boolean }) => p.id === created.id && p.isBuiltIn === false)).toBe(true);
+
+      const updateRes = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/profiles/${created.id}`,
+        payload: {
+          ...created,
+          name: 'Custom Galaxy S26 Ultra Updated',
+          carrierName: 'XL',
+          carrierMccMnc: '51011',
+        },
+      });
+      expect(updateRes.statusCode).toBe(200);
+      expect(updateRes.json().name).toBe('Custom Galaxy S26 Ultra Updated');
+      expect(updateRes.json().carrierName).toBe('XL');
+      expect(updateRes.json().isBuiltIn).toBe(false);
+
+      const editBuiltIn = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/profiles/pixel-8-pro',
+        payload: {
+          ...BUILTIN_DEVICE_PROFILES[0],
+          name: 'Tampered Pixel',
+        },
+      });
+      expect(editBuiltIn.statusCode).toBe(409);
+
+      const delBuiltIn = await app.inject({ method: 'DELETE', url: '/api/v1/profiles/pixel-8-pro' });
+      expect(delBuiltIn.statusCode).toBe(400);
+
+      const delCustom = await app.inject({ method: 'DELETE', url: `/api/v1/profiles/${created.id}` });
+      expect(delCustom.statusCode).toBe(200);
+      expect(delCustom.json()).toEqual({ deleted: true });
+
+      const getDeleted = await app.inject({ method: 'GET', url: `/api/v1/profiles/${created.id}` });
+      expect(getDeleted.statusCode).toBe(404);
+    } finally {
+      await app.close();
     }
   });
 });
