@@ -55,9 +55,22 @@ export class InputService {
     return { x: Math.round(x), y: Math.round(y) };
   }
 
+  /** Uses the persistent adb shell session when available (no process spawn per action). */
+  private async run(instance: InstanceRecord, command: string): Promise<void> {
+    if (this.adb.fastShell) {
+      try {
+        await this.adb.fastShell(instance.adbTarget, command);
+        return;
+      } catch {
+        // fall through to one-shot shell
+      }
+    }
+    await this.adb.shell(instance.adbTarget, command);
+  }
+
   async tap(instance: InstanceRecord, input: TapInput): Promise<{ x: number; y: number }> {
     const pt = this.resolveCoords(instance, input.x, input.y, input.normalized);
-    await this.adb.shell(instance.adbTarget, `input tap ${pt.x} ${pt.y}`);
+    await this.run(instance, `input tap ${pt.x} ${pt.y}`);
     return pt;
   }
 
@@ -78,10 +91,7 @@ export class InputService {
   async swipe(instance: InstanceRecord, input: SwipeInput): Promise<void> {
     const p1 = this.resolveCoords(instance, input.x1, input.y1, input.normalized);
     const p2 = this.resolveCoords(instance, input.x2, input.y2, input.normalized);
-    await this.adb.shell(
-      instance.adbTarget,
-      `input swipe ${p1.x} ${p1.y} ${p2.x} ${p2.y} ${input.durationMs}`,
-    );
+    await this.run(instance, `input swipe ${p1.x} ${p1.y} ${p2.x} ${p2.y} ${input.durationMs}`);
   }
 
   async text(instance: InstanceRecord, input: TextInput): Promise<void> {
@@ -106,7 +116,7 @@ export class InputService {
     if (!Number.isInteger(code) || code < 0) {
       throw new Error(`Unsupported keyevent: ${String(key)}`);
     }
-    await this.adb.shell(instance.adbTarget, `input keyevent ${code}`);
+    await this.run(instance, `input keyevent ${code}`);
     return code;
   }
 

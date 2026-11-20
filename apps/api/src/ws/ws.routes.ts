@@ -4,7 +4,7 @@ import type { AppContext } from '../context.js';
 export function registerWsRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get('/ws/instances/:id/stream', { websocket: true }, (socket, req) => {
     const { id } = req.params as { id: string };
-    const { fps } = req.query as { fps?: string };
+    const { fps, mode = 'jpeg' } = req.query as { fps?: string; mode?: string };
 
     let inst;
     try {
@@ -14,7 +14,17 @@ export function registerWsRoutes(app: FastifyInstance, ctx: AppContext): void {
       return;
     }
 
-    ctx.stream.subscribe(inst, socket, fps ? Number(fps) : 8);
+    if (mode === 'h264') {
+      ctx.h264.subscribe(inst, socket).catch((err: unknown) => {
+        const reason = err instanceof Error ? err.message : String(err);
+        if (socket.readyState === 1) {
+          socket.send(JSON.stringify({ type: 'fallback', reason }));
+          socket.close();
+        }
+      });
+    } else {
+      ctx.stream.subscribe(inst, socket, fps ? Number(fps) : 8);
+    }
 
     // Bidirectional control messages from Web Dashboard
     socket.on('message', async (raw: Buffer | string) => {

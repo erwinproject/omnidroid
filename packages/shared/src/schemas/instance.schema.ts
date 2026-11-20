@@ -35,6 +35,26 @@ export const CreateInstanceSchema = z.object({
   autoStart: z.boolean().default(true),
 });
 
+export const UpdateInstanceSchema = z
+  .object({
+    name: z.string().min(2).max(64).regex(/^[a-zA-Z0-9_-]+$/),
+    androidVersion: AndroidVersionSchema,
+    enablePlayStore: z.boolean(),
+    profileId: z.string(),
+    deviceProfile: DeviceProfileOverrideSchema,
+    stealthMode: z.boolean(),
+    width: z.number().int().min(320).max(2160),
+    height: z.number().int().min(480).max(3840),
+    dpi: z.number().int().min(120).max(640),
+    fps: z.number().int().min(15).max(60),
+    gpuMode: z.enum(['guest', 'host', 'auto']),
+    memoryMb: z.number().int().min(1024).max(32768),
+    cpus: z.number().min(1).max(16),
+    exposeAdbPort: z.boolean(),
+    customProps: z.record(z.string()),
+  })
+  .partial();
+
 export const InstanceRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -55,6 +75,8 @@ export const InstanceRecordSchema = z.object({
   cpus: z.number(),
   stealthMode: z.boolean(),
   enablePlayStore: z.boolean().default(false),
+  /** True when width/height/dpi were changed live; the next start recreates the container. */
+  bootConfigDirty: z.boolean().default(false),
   proxy: z.string().nullable(),
   proxyConfig: ProxyConfigSchema.nullable().default(null),
   proxyProfileId: z.string().nullable().default(null),
@@ -89,6 +111,7 @@ export const CloneInstanceSchema = z.object({
   exposeAdbPort: z.boolean().default(false),
 });
 
+export type UpdateInstanceInput = z.infer<typeof UpdateInstanceSchema>;
 export type InstanceStatus = z.infer<typeof InstanceStatusSchema>;
 export type CreateInstanceInput = z.infer<typeof CreateInstanceSchema>;
 export type InstanceRecord = z.infer<typeof InstanceRecordSchema>;

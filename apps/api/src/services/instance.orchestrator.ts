@@ -17,6 +17,7 @@ import {
   type PruneReport,
   type SetInstanceProxyInput,
   type SnapshotRecord,
+  type UpdateInstanceInput,
 } from '@droidforge/shared';
 import type { AppEnv } from '../config/env.js';
 import type { StateStore } from '../db/database.js';
@@ -153,6 +154,7 @@ export class InstanceOrchestrator {
       cpus: input.cpus,
       stealthMode: input.stealthMode,
       enablePlayStore,
+      bootConfigDirty: false,
       proxy: resolvedProxy.proxy,
       proxyConfig: resolvedProxy.proxyConfig,
       proxyProfileId: resolvedProxy.proxyProfileId,
@@ -323,9 +325,10 @@ export class InstanceOrchestrator {
   }
 
   async start(id: string): Promise<InstanceRecord> {
-    const inst = this.requireInstance(id);
+    let inst = this.requireInstance(id);
     if (!inst.containerId) throw new Error('Container not created');
-    await this.docker.startContainer(inst.containerId);
+    if (inst.bootConfigDirty) inst = await this.recreateContainer(inst);
+    await this.docker.startContainer(inst.containerId!);
     const updated = this.store.updateInstanceStatus(id, 'booting')!;
     this.schedulePostBootSetup(updated);
     return updated;
@@ -342,15 +345,159 @@ export class InstanceOrchestrator {
   }
 
   async restart(id: string): Promise<InstanceRecord> {
-    const inst = this.requireInstance(id);
+    let inst = this.requireInstance(id);
     if (!inst.containerId) throw new Error('Container not created');
     await this.proxyRelay.stopRelay(id);
-    await this.docker.restartContainer(inst.containerId);
+    this.stream.stopInstance(id);
+    if (inst.bootConfigDirty) {
+      inst = await this.recreateContainer(inst);
+      await this.docker.startContainer(inst.containerId!);
+    } else {
+      await this.docker.restartContainer(inst.containerId);
+    }
     const updated = this.store.updateInstanceStatus(id, 'booting')!;
     this.schedulePostBootSetup(updated);
     return updated;
   }
 
+  /** Recreates the Docker container from the stored record, keeping the /data volume. */
+  private async recreateContainer(inst: InstanceRecord): Promise<InstanceRecord> {
+    this.stream.stopInstance(inst.id);
+    await this.adb.disconnect(inst.adbTarget).catch(() => undefined);
+    await this.docker.removeContainer(inst.containerId, inst.volumeName, false, inst.containerName);
+    const next: InstanceRecord = { ...inst, containerId: null, bootConfigDirty: false };
+    const containerId = await this.docker.createContainer(next);
+    next.containerId = containerId;
+    next.updatedAt = new Date().toISOString();
+    this.store.saveInstance(next);
+    return next;
+  }
+
+  /**
+   * Edits an instance. Live-safe fields apply immediately; boot-time fields
+   * (profile, fps, GPU, stealth, props, image, ADB port) recreate the container
+   * while preserving the /data volume.
+   */
+  async update(id: string, patch: UpdateInstanceInput): Promise<InstanceRecord> {
+    const current = this.requireInstance(id);
+    const wasActive = current.status === 'running' || current.status === 'booting';
+    let next: InstanceRecord = { ...current };
+    let needsRecreate = false;
+    let displayChanged = false;
+
+    if (patch.name !== undefined && patch.name !== current.name) {
+      const clash = this.store.getInstanceByName(patch.name);
+      if (clash && clash.id !== id) throw new Error(`Instance with name "${patch.name}" already exists`);
+      next.name = patch.name;
+    }
+
+    // ---- Boot-time fields (container recreate) ----
+    if (patch.fps !== undefined && patch.fps !== current.fps) {
+      next.fps = patch.fps;
+      needsRecreate = true;
+    }
+    if (patch.gpuMode !== undefined && patch.gpuMode !== current.gpuMode) {
+      next.gpuMode = patch.gpuMode;
+      needsRecreate = true;
+    }
+    if (patch.stealthMode !== undefined && patch.stealthMode !== current.stealthMode) {
+      next.stealthMode = patch.stealthMode;
+      needsRecreate = true;
+    }
+    if (patch.customProps !== undefined) {
+      next.customProps = patch.customProps;
+      needsRecreate = true;
+    }
+
+    if (patch.profileId !== undefined || patch.deviceProfile !== undefined) {
+      const base = this.store.getProfile(patch.profileId ?? current.profile.id) ?? current.profile;
+      const merged: DeviceProfile = {
+        ...base,
+        // keep the instance identity unless explicitly overridden
+        serialNo: current.profile.serialNo,
+        androidId: current.profile.androidId,
+        macAddress: current.profile.macAddress,
+        ...(patch.deviceProfile ?? {}),
+      };
+      const identity = generateRealisticIdentity(merged.macOui);
+      if (!merged.serialNo) merged.serialNo = identity.serialNo;
+      if (!merged.androidId) merged.androidId = identity.androidId;
+      if (!merged.macAddress) merged.macAddress = identity.macAddress;
+      next.profile = merged;
+      needsRecreate = true;
+    }
+
+    const versionChanged = patch.androidVersion !== undefined && patch.androidVersion !== current.androidVersion;
+    const storeChanged = patch.enablePlayStore !== undefined && patch.enablePlayStore !== current.enablePlayStore;
+    if (versionChanged || storeChanged) {
+      next.androidVersion = patch.androidVersion ?? current.androidVersion;
+      next.enablePlayStore = patch.enablePlayStore ?? current.enablePlayStore;
+      next.image = next.enablePlayStore
+        ? `${this.env.REDROID_PLAYSTORE_IMAGE_REPO}:${next.androidVersion}.0.0-playstore`
+        : `${this.env.REDROID_IMAGE_REPO}:${next.androidVersion}.0.0-latest`;
+      needsRecreate = true;
+    }
+
+    if (patch.exposeAdbPort !== undefined && Boolean(current.hostAdbPort) !== patch.exposeAdbPort) {
+      next.hostAdbPort = patch.exposeAdbPort
+        ? this.store.allocateUniqueAdbPort(this.env.ADB_PORT_MIN, this.env.ADB_PORT_MAX)
+        : null;
+      needsRecreate = true;
+    }
+
+    // ---- Display (live via wm, persisted on next boot) ----
+    for (const key of ['width', 'height', 'dpi'] as const) {
+      const value = patch[key];
+      if (value !== undefined && value !== current[key]) {
+        next[key] = value;
+        displayChanged = true;
+      }
+    }
+
+    // ---- Resources (live via docker update) ----
+    const resourcesChanged =
+      (patch.memoryMb !== undefined && patch.memoryMb !== current.memoryMb) ||
+      (patch.cpus !== undefined && patch.cpus !== current.cpus);
+    if (patch.memoryMb !== undefined) next.memoryMb = patch.memoryMb;
+    if (patch.cpus !== undefined) next.cpus = patch.cpus;
+
+    next.updatedAt = new Date().toISOString();
+
+    if (needsRecreate) {
+      // Boot args are read from the record, so width/height/dpi are applied by the recreate too.
+      next.bootConfigDirty = false;
+      await this.proxyRelay.stopRelay(id).catch(() => undefined);
+      this.store.saveInstance(next);
+      next = await this.recreateContainer(next);
+      if (wasActive) {
+        await this.docker.startContainer(next.containerId!);
+        next = this.store.updateInstanceStatus(id, 'booting')!;
+        this.schedulePostBootSetup(next);
+      } else {
+        next = this.store.updateInstanceStatus(id, 'stopped')!;
+      }
+      return next;
+    }
+
+    if (displayChanged) next.bootConfigDirty = true;
+    this.store.saveInstance(next);
+
+    if (resourcesChanged && next.containerId) {
+      try {
+        await this.docker.updateResources(next.containerId, next.memoryMb, next.cpus);
+      } catch {
+        next.bootConfigDirty = true;
+        this.store.saveInstance(next);
+      }
+    }
+    if (displayChanged && wasActive) {
+      await this.adb.shell(next.adbTarget, `wm size ${next.width}x${next.height}`).catch(() => undefined);
+      await this.adb.shell(next.adbTarget, `wm density ${next.dpi}`).catch(() => undefined);
+      this.stream.stopInstance(id); // viewers reconnect with the new resolution
+    }
+
+    return this.requireInstance(id);
+  }
   private removeSnapshotFilesForInstance(instanceId: string): {
     removedFiles: number;
     reclaimedBytes: number;

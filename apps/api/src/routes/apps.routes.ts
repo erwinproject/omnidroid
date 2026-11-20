@@ -5,6 +5,7 @@ import { pipeline } from 'node:stream/promises';
 import type { FastifyInstance } from 'fastify';
 import { AppLaunchInputSchema, AppPermissionsInputSchema } from '@droidforge/shared';
 import type { AppContext } from '../context.js';
+import { detectPackageKind, installPackageFile, type InstallResult } from '../services/apk-install.service.js';
 
 export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.get('/api/v1/instances/:id/apps', { schema: { tags: ['Apps'], summary: 'List installed packages on the instance' } }, async (req) => {
@@ -28,35 +29,56 @@ export function registerAppRoutes(app: FastifyInstance, ctx: AppContext): void {
     const inst = ctx.orchestrator.requireInstance(id);
     const tmpDir = path.resolve(ctx.env.DATA_DIR, 'uploads');
     fs.mkdirSync(tmpDir, { recursive: true });
-    const tmpApk = path.join(tmpDir, `${crypto.randomBytes(6).toString('hex')}.apk`);
+
+    const tmpFiles: string[] = [];
+    const results: InstallResult[] = [];
+    const newTmp = (name: string): string => {
+      const safe = path.basename(name).replace(/[^\w.\-+]/g, '_') || 'upload.apk';
+      const file = path.join(tmpDir, `${crypto.randomBytes(6).toString('hex')}_${safe}`);
+      tmpFiles.push(file);
+      return file;
+    };
 
     try {
       if (req.isMultipart()) {
-        const file = await req.file();
-        if (!file) return reply.code(400).send({ error: 'Missing APK file in multipart upload' });
-        await pipeline(file.file, fs.createWriteStream(tmpApk));
+        for await (const part of req.files()) {
+          const tmp = newTmp(part.filename);
+          await pipeline(part.file, fs.createWriteStream(tmp));
+          results.push(await installPackageFile(ctx.adb, inst.adbTarget, tmp, part.filename, tmpDir));
+        }
+        if (results.length === 0) return reply.code(400).send({ error: 'Missing APK file in multipart upload' });
       } else {
         const body = (req.body ?? {}) as { url?: string };
         if (!body.url) return reply.code(400).send({ error: 'Provide multipart APK file or JSON { url }' });
-        const resp = await fetch(body.url);
+        let parsed: URL;
+        try {
+          parsed = new URL(body.url);
+        } catch {
+          return reply.code(400).send({ error: 'Invalid URL' });
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          return reply.code(400).send({ error: 'Only http(s) URLs are supported' });
+        }
+        const resp = await fetch(parsed);
         if (!resp.ok || !resp.body) {
           return reply.code(400).send({ error: `Failed to download APK from URL (${resp.status})` });
         }
-        const buf = Buffer.from(await resp.arrayBuffer());
-        fs.writeFileSync(tmpApk, buf);
+        const urlName = path.posix.basename(parsed.pathname) || 'download.apk';
+        const name = detectPackageKind(urlName) ? urlName : `${urlName}.apk`;
+        const tmp = newTmp(name);
+        await pipeline(resp.body as unknown as NodeJS.ReadableStream, fs.createWriteStream(tmp));
+        results.push(await installPackageFile(ctx.adb, inst.adbTarget, tmp, name, tmpDir));
       }
 
-      const result = await ctx.adb.installApk(inst.adbTarget, tmpApk, {
-        grantPermissions: true,
-        reinstall: true,
-      });
-
-      if (result.exitCode !== 0) {
-        return reply.code(500).send({ error: result.stderr || result.stdout || 'APK install failed' });
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length === results.length) {
+        return reply.code(500).send({ error: failed[0]?.error ?? 'APK install failed', results });
       }
-      return { ok: true, output: result.stdout };
+      return { ok: failed.length === 0, output: results[0]?.output ?? '', results };
     } finally {
-      if (fs.existsSync(tmpApk)) fs.unlinkSync(tmpApk);
+      for (const f of tmpFiles) {
+        if (fs.existsSync(f)) fs.rmSync(f, { force: true });
+      }
     }
   });
 

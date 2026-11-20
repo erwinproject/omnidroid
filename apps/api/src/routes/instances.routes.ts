@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { CloneInstanceSchema, CreateInstanceSchema, type InstanceRecord } from '@droidforge/shared';
+import { CloneInstanceSchema, CreateInstanceSchema, UpdateInstanceSchema, type InstanceRecord } from '@droidforge/shared';
 import type { AppContext } from '../context.js';
 
 function sanitizeInstance(inst: InstanceRecord): InstanceRecord {
@@ -27,6 +27,12 @@ export function registerInstanceRoutes(app: FastifyInstance, ctx: AppContext): v
   app.get('/api/v1/instances/:id', { schema: { tags: ['Instances'], summary: 'Get instance details' } }, async (req) => {
     const { id } = req.params as { id: string };
     return sanitizeInstance(ctx.orchestrator.requireInstance(id));
+  });
+
+  app.patch('/api/v1/instances/:id', { schema: { tags: ['Instances'], summary: 'Edit an instance: live fields (name, RAM, CPU, display) apply instantly; profile, fps, GPU, stealth, props and image recreate the container while keeping /data' } }, async (req) => {
+    const { id } = req.params as { id: string };
+    const patch = UpdateInstanceSchema.parse(req.body ?? {});
+    return sanitizeInstance(await ctx.orchestrator.update(id, patch));
   });
 
   app.post('/api/v1/instances/:id/start', { schema: { tags: ['Instances'], summary: 'Start a stopped instance' } }, async (req) => {

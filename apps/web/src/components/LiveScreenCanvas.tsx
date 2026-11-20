@@ -20,6 +20,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { buildWsUrl, createClient } from "../api/client";
+import { H264Player, pickRenderer } from "../lib/h264-player";
 
 interface Props {
   instance: InstanceRecord;
@@ -49,6 +50,8 @@ export const LiveScreenCanvas: React.FC<Props> = ({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const frameCountRef = useRef(0);
   const wsRef = useRef<WebSocket | null>(null);
   const nativeFsActiveRef = useRef(false);
   const dragStart = useRef<{
@@ -63,6 +66,9 @@ export const LiveScreenCanvas: React.FC<Props> = ({
   >("connecting");
   const [hasFrame, setHasFrame] = useState(false);
   const [streamEpoch, setStreamEpoch] = useState(0);
+  const [streamMode, setStreamMode] = useState<"h264" | "jpeg">("h264");
+  const [renderer, setRenderer] = useState<"canvas" | "video">("canvas");
+  const [liveFps, setLiveFps] = useState(0);
   const [orientation, setOrientation] = useState<"portrait" | "landscape">(
     "portrait",
   );
@@ -150,8 +156,28 @@ export const LiveScreenCanvas: React.FC<Props> = ({
   }
 
   useEffect(() => {
+    setStreamMode("h264");
+  }, [instance.id]);
+
+  useEffect(() => {
+    if (instance.status === "running") {
+      setStreamMode("h264");
+    }
+  }, [instance.status]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setLiveFps(frameCountRef.current);
+      frameCountRef.current = 0;
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     setHasFrame(false);
     setFeedback(null);
+    setLiveFps(0);
+    frameCountRef.current = 0;
     if (instance.status === "stopped") {
       setStreamStatus("offline");
       wsRef.current = null;
@@ -159,44 +185,111 @@ export const LiveScreenCanvas: React.FC<Props> = ({
     }
 
     setStreamStatus("connecting");
+    const useH264 = streamMode === "h264";
+    const rendererKind = useH264 ? pickRenderer() : "webcodecs";
+    setRenderer(useH264 && rendererKind === "mse" ? "video" : "canvas");
+
     const ws = new WebSocket(
-      buildWsUrl(`/ws/instances/${instance.id}/stream?fps=8`),
+      buildWsUrl(
+        `/ws/instances/${instance.id}/stream?mode=${streamMode}&fps=8`,
+      ),
     );
-    ws.binaryType = "blob";
+    ws.binaryType = useH264 ? "arraybuffer" : "blob";
     wsRef.current = ws;
 
-    ws.onopen = () => setStreamStatus("live");
-    ws.onclose = () => setStreamStatus("offline");
-    ws.onerror = () => setStreamStatus("offline");
-    ws.onmessage = async (event) => {
-      if (!(event.data instanceof Blob)) return;
-      try {
-        const bitmap = await createImageBitmap(event.data);
-        const canvas = canvasRef.current;
-        if (!canvas) {
-          bitmap.close();
-          return;
-        }
-        if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-          canvas.width = bitmap.width;
-          canvas.height = bitmap.height;
-        }
-        const ctx = canvas.getContext("2d");
-        ctx?.drawImage(bitmap, 0, 0);
-        bitmap.close();
+    let player: H264Player | null = null;
+    let closedByUs = false;
+    let gotMedia = false;
+    let reconnectTimer: number | undefined;
+
+    const markFrame = () => {
+      frameCountRef.current += 1;
+      if (!gotMedia) {
+        gotMedia = true;
         setHasFrame(true);
+      }
+    };
+
+    if (useH264) {
+      // Defer one tick so the <video> element for the MSE renderer is mounted.
+      player = new H264Player({
+        renderer: rendererKind,
+        canvas: canvasRef.current,
+        video: videoRef.current,
+        onFrame: markFrame,
+      });
+    }
+
+    // JPEG fallback: decode only the newest frame, drop the rest.
+    let jpegBusy = false;
+    let jpegPending: Blob | null = null;
+    async function drawJpeg(blob: Blob) {
+      jpegBusy = true;
+      try {
+        const bitmap = await createImageBitmap(blob);
+        const canvas = canvasRef.current;
+        if (canvas) {
+          if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+            canvas.width = bitmap.width;
+            canvas.height = bitmap.height;
+          }
+          canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
+          markFrame();
+        }
+        bitmap.close();
       } catch {
         // Ignore transient decode failure on truncated frames
+      } finally {
+        jpegBusy = false;
+        if (jpegPending) {
+          const next = jpegPending;
+          jpegPending = null;
+          void drawJpeg(next);
+        }
+      }
+    }
+
+    ws.onopen = () => setStreamStatus("live");
+    ws.onclose = () => {
+      setStreamStatus("offline");
+      if (!closedByUs && gotMedia) {
+        reconnectTimer = window.setTimeout(
+          () => setStreamEpoch((n) => n + 1),
+          1500,
+        );
+      }
+    };
+    ws.onerror = () => setStreamStatus("offline");
+    ws.onmessage = (event) => {
+      if (typeof event.data === "string") {
+        try {
+          const msg = JSON.parse(event.data) as { type?: string };
+          if (msg.type === "fallback") {
+            closedByUs = true;
+            setStreamMode("jpeg");
+          }
+        } catch {
+          // ignore malformed control message
+        }
+        return;
+      }
+      if (player && event.data instanceof ArrayBuffer) {
+        player.push(event.data);
+      } else if (event.data instanceof Blob) {
+        if (jpegBusy) jpegPending = event.data;
+        else void drawJpeg(event.data);
       }
     };
 
     return () => {
+      closedByUs = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      player?.destroy();
       ws.close();
       wsRef.current = null;
     };
-  }, [instance.id, instance.status, streamEpoch]);
-
-  function getNormalizedCoords(e: React.PointerEvent<HTMLCanvasElement>) {
+  }, [instance.id, instance.status, streamEpoch, streamMode]);
+  function getNormalizedCoords(e: React.PointerEvent<HTMLElement>) {
     const rect = e.currentTarget.getBoundingClientRect();
     return {
       x: Math.max(
@@ -210,14 +303,14 @@ export const LiveScreenCanvas: React.FC<Props> = ({
     };
   }
 
-  function handlePointerDown(e: React.PointerEvent<HTMLCanvasElement>) {
+  function handlePointerDown(e: React.PointerEvent<HTMLElement>) {
     if (e.button !== 0 && e.pointerType === "mouse") return;
     e.currentTarget.setPointerCapture(e.pointerId);
     const pt = getNormalizedCoords(e);
     dragStart.current = { ...pt, time: Date.now(), pointerId: e.pointerId };
   }
 
-  function handlePointerUp(e: React.PointerEvent<HTMLCanvasElement>) {
+  function handlePointerUp(e: React.PointerEvent<HTMLElement>) {
     if (!dragStart.current || dragStart.current.pointerId !== e.pointerId)
       return;
     const start = dragStart.current;
@@ -320,7 +413,7 @@ export const LiveScreenCanvas: React.FC<Props> = ({
     instance.status === "stopped"
       ? "Stopped"
       : streamStatus === "live"
-        ? "Stream Live"
+        ? `Live ${streamMode === "h264" ? "H.264" : "JPEG"}${liveFps > 0 ? ` � ${liveFps} fps` : ""}`
         : streamStatus === "connecting"
           ? "Connecting"
           : "Disconnected";
@@ -478,32 +571,53 @@ export const LiveScreenCanvas: React.FC<Props> = ({
                 {actionBusy ? "Booting..." : "Boot Instance"}
               </button>
             </div>
-          ) : showAiOverlay && aiSnapshot ? (
-            <img
-              src={`data:${aiSnapshot.mimeType};base64,${aiSnapshot.annotatedImageBase64}`}
-              alt={`AI Set-of-Marks overlay for ${instance.name}`}
-              style={{
-                maxWidth: stageBounds.maxW,
-                maxHeight: stageBounds.maxH,
-              }}
-              className="block h-auto w-auto object-contain"
-            />
           ) : (
-            <div className="relative flex items-center justify-center">
-              <canvas
-                ref={canvasRef}
-                width={360}
-                height={780}
-                onPointerDown={handlePointerDown}
-                onPointerUp={handlePointerUp}
-                onPointerCancel={handlePointerCancel}
-                aria-label={`Live Android screen for ${instance.name}`}
-                style={{
-                  maxWidth: stageBounds.maxW,
-                  maxHeight: stageBounds.maxH,
-                }}
-                className="block h-auto w-auto cursor-crosshair touch-none select-none bg-[var(--bg-terminal)]"
-              />
+            <>
+              {showAiOverlay && aiSnapshot && (
+                <img
+                  src={`data:${aiSnapshot.mimeType};base64,${aiSnapshot.annotatedImageBase64}`}
+                  alt={`AI Set-of-Marks overlay for ${instance.name}`}
+                  style={{
+                    maxWidth: stageBounds.maxW,
+                    maxHeight: stageBounds.maxH,
+                  }}
+                  className="block h-auto w-auto object-contain"
+                />
+              )}
+              <div
+                className={`relative flex items-center justify-center ${!hasFrame ? "min-h-[360px] min-w-[220px]" : ""} ${showAiOverlay && aiSnapshot ? "hidden" : ""}`}
+              >
+                <canvas
+                  ref={canvasRef}
+                  width={360}
+                  height={780}
+                  onPointerDown={handlePointerDown}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerCancel}
+                  aria-label={`Live Android screen for ${instance.name}`}
+                  style={{
+                    maxWidth: stageBounds.maxW,
+                    maxHeight: stageBounds.maxH,
+                  }}
+                  className={`h-auto w-auto cursor-crosshair touch-none select-none bg-[var(--bg-terminal)] ${renderer === "canvas" ? "block" : "hidden"}`}
+                />
+                <video
+                  ref={videoRef}
+                  muted
+                  autoPlay
+                  playsInline
+                  draggable={false}
+                  onContextMenu={(e) => e.preventDefault()}
+                  onPointerDown={handlePointerDown}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerCancel}
+                  aria-label={`Live Android video for ${instance.name}`}
+                  style={{
+                    maxWidth: stageBounds.maxW,
+                    maxHeight: stageBounds.maxH,
+                  }}
+                  className={`h-auto w-auto cursor-crosshair touch-none select-none bg-[var(--bg-terminal)] ${renderer === "video" ? "block" : "hidden"}`}
+                />
               {!hasFrame && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[var(--bg-terminal)] p-4 text-center text-[var(--ink-terminal)]">
                   <div className="text-sm font-bold">
@@ -523,7 +637,10 @@ export const LiveScreenCanvas: React.FC<Props> = ({
                   {streamStatus === "offline" && (
                     <button
                       type="button"
-                      onClick={() => setStreamEpoch((n) => n + 1)}
+                      onClick={() => {
+                        setStreamMode("h264");
+                        setStreamEpoch((n) => n + 1);
+                      }}
                       className="nb-btn nb-btn-primary"
                     >
                       <RefreshCw className="h-4 w-4" aria-hidden="true" />
@@ -532,7 +649,8 @@ export const LiveScreenCanvas: React.FC<Props> = ({
                   )}
                 </div>
               )}
-            </div>
+              </div>
+            </>
           )}
         </div>
       </div>

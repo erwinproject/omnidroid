@@ -22,6 +22,7 @@ import { registerSystemRoutes } from './routes/system.routes.js';
 import { registerUiRoutes } from './routes/ui.routes.js';
 import { AdbService, type AdbExecutor } from './services/adb.service.js';
 import { AiSnapshotService } from './services/ai-snapshot.service.js';
+import { H264StreamService } from './services/h264-stream.service.js';
 import { InputService } from './services/input.service.js';
 import { InstanceOrchestrator } from './services/instance.orchestrator.js';
 import { ProxyRelayService } from './services/proxy-relay.service.js';
@@ -56,6 +57,8 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
   const ui = new UiAutomationService(adb, input);
   const aiSnapshot = new AiSnapshotService(adb, ui);
   const stream = new StreamService(adb);
+  const h264 = new H264StreamService(adb, env);
+  stream.attachH264(h264);
   const orchestrator = new InstanceOrchestrator(
     env,
     store,
@@ -82,6 +85,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
     ui,
     aiSnapshot,
     stream,
+    h264,
     orchestrator,
   };
 

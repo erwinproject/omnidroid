@@ -23,6 +23,7 @@ function normalizeInstance(raw: InstanceRecord): InstanceRecord {
   return {
     ...raw,
     enablePlayStore: raw.enablePlayStore ?? false,
+    bootConfigDirty: raw.bootConfigDirty ?? false,
     proxyProfileId: raw.proxyProfileId ?? null,
     proxyConfig,
   };

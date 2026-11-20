@@ -25,6 +25,12 @@ export interface AdbExecutor {
   getPublicKey?(): Promise<string | null>;
   isAuthorized?(target: string): Promise<boolean>;
   spawnLogcat(target: string, args?: string[]): ChildProcess;
+  installMultiple?(target: string, apkPaths: string[]): Promise<ShellResult>;
+  forward?(target: string, remote: string): Promise<number>;
+  removeForward?(target: string, localPort: number): Promise<void>;
+  spawnShell?(target: string, command: string): ChildProcess;
+  /** Persistent-session shell for low latency input; resolves when the command was written. */
+  fastShell?(target: string, command: string): Promise<void>;
 }
 
 export class AdbService implements AdbExecutor {
@@ -140,6 +146,48 @@ export class AdbService implements AdbExecutor {
   async isAuthorized(target: string): Promise<boolean> {
     const res = await this.runAdb(['-s', target, 'get-state'], 5000);
     return res.exitCode === 0 && res.stdout.trim() === 'device';
+  }
+
+  async installMultiple(target: string, apkPaths: string[]): Promise<ShellResult> {
+    return this.runAdb(['-s', target, 'install-multiple', '-r', '-g', ...apkPaths], 180000);
+  }
+
+  async forward(target: string, remote: string): Promise<number> {
+    const res = await this.runAdb(['-s', target, 'forward', 'tcp:0', remote], 8000);
+    const port = Number.parseInt(res.stdout.split(/\s+/)[0] ?? '', 10);
+    if (res.exitCode !== 0 || !Number.isInteger(port) || port <= 0) {
+      throw new Error(res.stderr || res.stdout || 'adb forward failed');
+    }
+    return port;
+  }
+
+  async removeForward(target: string, localPort: number): Promise<void> {
+    await this.runAdb(['-s', target, 'forward', '--remove', `tcp:${localPort}`], 5000);
+  }
+
+  spawnShell(target: string, command: string): ChildProcess {
+    return spawn(this.adbBin, ['-s', target, 'shell', command], { stdio: ['ignore', 'pipe', 'pipe'] });
+  }
+
+  private readonly fastSessions = new Map<string, ChildProcess>();
+
+  async fastShell(target: string, command: string): Promise<void> {
+    let child = this.fastSessions.get(target);
+    if (!child || child.killed || child.exitCode !== null || !child.stdin?.writable) {
+      child = spawn(this.adbBin, ['-s', target, 'shell'], { stdio: ['pipe', 'ignore', 'ignore'] });
+      child.on('exit', () => {
+        if (this.fastSessions.get(target) === child) this.fastSessions.delete(target);
+      });
+      child.on('error', () => {
+        if (this.fastSessions.get(target) === child) this.fastSessions.delete(target);
+      });
+      this.fastSessions.set(target, child);
+    }
+    const stdin = child.stdin;
+    if (!stdin) throw new Error('adb shell session unavailable');
+    await new Promise<void>((resolve, reject) => {
+      stdin.write(command + '\n', (err) => (err ? reject(err) : resolve()));
+    });
   }
 
   spawnLogcat(target: string, args: string[] = []): ChildProcess {

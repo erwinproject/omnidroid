@@ -31,6 +31,7 @@ import type {
   TapInput,
   TestProxyInput,
   TextInput,
+  UpdateInstanceInput,
   UiBatchActionsInput,
   UiClickInput,
   UiNode,
@@ -103,6 +104,11 @@ export class EmulatorApiClient {
     create: (input: CreateInstanceInput) =>
       this.request<InstanceRecord>('/api/v1/instances', {
         method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    update: (id: string, input: UpdateInstanceInput) =>
+      this.request<InstanceRecord>(`/api/v1/instances/${id}`, {
+        method: 'PATCH',
         body: JSON.stringify(input),
       }),
     start: (id: string) =>
@@ -205,6 +211,34 @@ export class EmulatorApiClient {
         method: 'POST',
         body: JSON.stringify(options ?? {}),
       }),
+    streamCheck: (instanceId: string) =>
+      this.request<{
+        jarPresent: boolean;
+        adbForwardSupported: boolean;
+        started: boolean;
+        firstFrameMs: number | null;
+        width: number | null;
+        height: number | null;
+        error: string | null;
+      }>(`/api/v1/system/stream-check?instanceId=${encodeURIComponent(instanceId)}`),
+  };
+
+  readonly files = {
+    list: (id: string, remotePath = '/sdcard') =>
+      this.request<{
+        path: string;
+        entries: Array<{ name: string; isDir: boolean; size: number; permissions: string; modified: string }>;
+      }>(`/api/v1/instances/${id}/files/list?path=${encodeURIComponent(remotePath)}`),
+    mkdir: (id: string, remotePath: string) =>
+      this.request<{ ok: boolean; path: string }>(`/api/v1/instances/${id}/files/mkdir`, {
+        method: 'POST',
+        body: JSON.stringify({ path: remotePath }),
+      }),
+    delete: (id: string, remotePath: string) =>
+      this.request<{ deleted: boolean; path: string }>(
+        `/api/v1/instances/${id}/files?path=${encodeURIComponent(remotePath)}`,
+        { method: 'DELETE' },
+      ),
   };
 
   readonly input = {

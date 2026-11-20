@@ -5,6 +5,7 @@ import {
   Code2,
   Copy,
   Cpu,
+  FolderOpen,
   Globe,
   Layers,
   Package,
@@ -14,10 +15,11 @@ import {
   ShieldCheck,
   Terminal,
   Trash2,
-  Upload,
 } from 'lucide-react';
 import { buildWsUrl, createClient, getApiKey } from '../api/client';
 import { ProxyPanel } from './ProxyPanel';
+import { ApkInstaller } from './ApkInstaller';
+import { FileManagerPanel } from './FileManagerPanel';
 
 interface Props {
   instance: InstanceRecord;
@@ -29,7 +31,7 @@ interface Props {
   onInstanceRefresh?: () => void;
 }
 
-type Tab = 'ai' | 'apps' | 'proxy' | 'stealth' | 'logcat' | 'api';
+type Tab = 'ai' | 'apps' | 'files' | 'proxy' | 'stealth' | 'logcat' | 'api';
 
 export const InspectorPanel: React.FC<Props> = ({
   instance,
@@ -49,7 +51,6 @@ export const InspectorPanel: React.FC<Props> = ({
   const [appsError, setAppsError] = useState<string | null>(null);
   const [appsStatusMsg, setAppsStatusMsg] = useState<string | null>(null);
   const [confirmUninstallPkg, setConfirmUninstallPkg] = useState<string | null>(null);
-  const [uploadingApk, setUploadingApk] = useState(false);
 
   const [stealthReport, setStealthReport] = useState<StealthCheckReport | null>(null);
   const [stealthLoading, setStealthLoading] = useState(false);
@@ -132,31 +133,6 @@ export const InspectorPanel: React.FC<Props> = ({
       setAppsError(err instanceof Error ? err.message : String(err));
     } finally {
       setAppsLoading(false);
-    }
-  }
-
-  async function uploadApk(file: File) {
-    setUploadingApk(true);
-    setAppsError(null);
-    setAppsStatusMsg(`Installing ${file.name}...`);
-    try {
-      const form = new FormData();
-      form.append('file', file);
-      const res = await fetch(`/api/v1/instances/${instance.id}/apps/install`, {
-        method: 'POST',
-        headers: getApiKey() ? { 'X-API-Key': getApiKey() } : {},
-        body: form,
-      });
-      if (!res.ok) {
-        throw new Error(`Install failed (HTTP ${res.status})`);
-      }
-      setAppsStatusMsg(`Installed ${file.name}`);
-      await loadApps();
-    } catch (err) {
-      setAppsStatusMsg(null);
-      setAppsError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setUploadingApk(false);
     }
   }
 
@@ -266,6 +242,7 @@ export const InspectorPanel: React.FC<Props> = ({
   const tabs: Array<{ id: Tab; label: string; title: string; icon: React.ReactNode }> = [
     { id: 'ai', label: 'UI', title: 'UI & AI', icon: <Layers className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'apps', label: 'Apps', title: 'Apps & APK', icon: <Package className="h-3.5 w-3.5" aria-hidden="true" /> },
+    { id: 'files', label: 'Files', title: 'File Sharing', icon: <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'proxy', label: 'Proxy', title: 'Proxy & Network', icon: <Globe className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'stealth', label: 'Stealth', title: 'Stealth & ADB', icon: <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'logcat', label: 'Logs', title: 'Logcat Stream', icon: <Terminal className="h-3.5 w-3.5" aria-hidden="true" /> },
@@ -314,7 +291,7 @@ export const InspectorPanel: React.FC<Props> = ({
       <div
         role="tablist"
         aria-label="Device Inspector sections"
-        className="grid shrink-0 grid-cols-6 border-b-2 border-[var(--border)] bg-[var(--bg-subtle)]"
+        className="grid shrink-0 grid-cols-7 border-b-2 border-[var(--border)] bg-[var(--bg-subtle)]"
       >
         {tabs.map((t) => {
           const active = tab === t.id;
@@ -329,7 +306,7 @@ export const InspectorPanel: React.FC<Props> = ({
                 setTab(t.id);
                 if (t.id === 'apps') void loadApps();
               }}
-              className={`flex min-h-[44px] min-w-0 items-center justify-center gap-1 border-r-2 border-[var(--border)] px-1 text-xs font-bold whitespace-nowrap transition-colors last:border-r-0 xl:px-1.5 ${
+              className={`flex min-h-[44px] min-w-0 items-center justify-center gap-1 border-r-2 border-[var(--border)] px-1 text-[11px] font-bold whitespace-nowrap transition-colors last:border-r-0 sm:text-xs xl:px-1.5 ${
                 active
                   ? 'bg-[var(--accent)] text-[var(--accent-ink)]'
                   : 'bg-[var(--bg-surface)] text-[var(--ink-secondary)] hover:bg-[var(--bg-ground)] hover:text-[var(--ink)]'
@@ -522,21 +499,7 @@ export const InspectorPanel: React.FC<Props> = ({
               </button>
             </div>
 
-            <label className="flex min-h-[52px] cursor-pointer items-center justify-center gap-2 border-2 border-dashed border-[var(--border)] bg-[var(--bg-ground)] p-3.5 text-[13px] font-bold text-[var(--ink)] hover:bg-[var(--bg-subtle)]">
-              <Upload className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>{uploadingApk ? 'Installing APK...' : 'Upload and Install APK (.apk)'}</span>
-              <input
-                type="file"
-                accept=".apk"
-                disabled={uploadingApk}
-                className="sr-only"
-                onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) void uploadApk(f);
-                  e.target.value = '';
-                }}
-              />
-            </label>
+            <ApkInstaller instanceId={instance.id} disabled={instance.status === 'stopped'} onInstalled={() => void loadApps()} />
 
             {appsError && (
               <div className="flex flex-wrap items-center justify-between gap-2 border-2 border-[var(--border)] bg-[var(--status-err-bg)] p-3 text-[13px] font-semibold text-[var(--status-err-ink)]">
@@ -614,6 +577,8 @@ export const InspectorPanel: React.FC<Props> = ({
             )}
           </div>
         )}
+
+        {tab === 'files' && <FileManagerPanel instance={instance} />}
 
         {tab === 'stealth' && (
           <div className="space-y-4">

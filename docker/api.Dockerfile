@@ -22,6 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+ARG SCRCPY_VERSION=3.1
+RUN mkdir -p /opt/scrcpy \
+    && curl -fsSL -o /opt/scrcpy/scrcpy-server.jar \
+       https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-server-v${SCRCPY_VERSION}
+
+ENV SCRCPY_SERVER_PATH=/opt/scrcpy/scrcpy-server.jar
+ENV SCRCPY_VERSION=${SCRCPY_VERSION}
+
 WORKDIR /app
 
 COPY package.json tsconfig.base.json ./

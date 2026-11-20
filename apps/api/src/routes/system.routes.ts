@@ -61,4 +61,20 @@ export function registerSystemRoutes(app: FastifyInstance, ctx: AppContext): voi
       return ctx.prune.prune(options);
     },
   );
+
+  app.get(
+    '/api/v1/system/stream-check',
+    {
+      schema: {
+        tags: ['System'],
+        summary: 'Diagnose H.264 streaming: scrcpy-server presence, encoder start and time to first frame',
+      },
+    },
+    async (req, reply) => {
+      const { instanceId } = req.query as { instanceId?: string };
+      if (!instanceId) return reply.code(400).send({ error: 'Query param "instanceId" is required' });
+      const inst = ctx.orchestrator.requireInstance(instanceId);
+      return ctx.h264.check(inst);
+    },
+  );
 }

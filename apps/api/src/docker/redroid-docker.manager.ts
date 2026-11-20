@@ -293,6 +293,16 @@ export class RedroidDockerManager {
     return container.id;
   }
 
+  /** Live-resizes container memory/CPU without a restart. */
+  async updateResources(containerId: string, memoryMb: number, cpus: number): Promise<void> {
+    const memory = memoryMb * 1024 * 1024;
+    await this.docker.getContainer(containerId).update({
+      Memory: memory,
+      MemorySwap: memory * 2,
+      NanoCpus: Math.round(cpus * 1e9),
+    });
+  }
+
   async startContainer(containerId: string): Promise<void> {
     const container = this.docker.getContainer(containerId);
     const info = await container.inspect();

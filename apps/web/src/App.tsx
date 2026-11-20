@@ -7,6 +7,7 @@ import {
   Layers,
   Monitor,
   Moon,
+  Pencil,
   Plus,
   Power,
   RefreshCw,
@@ -22,6 +23,7 @@ import {
 import { createClient, getApiKey } from './api/client';
 import { ApiKeyModal } from './components/ApiKeyModal';
 import { CreateInstanceModal } from './components/CreateInstanceModal';
+import { EditInstanceModal } from './components/EditInstanceModal';
 import { DroidForgeMark } from './components/DroidForgeMark';
 import { InspectorPanel } from './components/InspectorPanel';
 import { LiveScreenCanvas } from './components/LiveScreenCanvas';
@@ -56,6 +58,7 @@ export const App: React.FC = () => {
   const [fleetDrawerOpen, setFleetDrawerOpen] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [editInstance, setEditInstance] = useState<InstanceRecord | null>(null);
   const [pruneModalOpen, setPruneModalOpen] = useState(false);
   const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);
   const [hasApiKey, setHasApiKey] = useState(() => Boolean(getApiKey()));
@@ -418,6 +421,16 @@ export const App: React.FC = () => {
                       </>
                     )}
 
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => setEditInstance(inst)}
+                      className="nb-btn nb-btn-secondary px-2.5"
+                      aria-label={`Edit ${inst.name}`}
+                    >
+                      <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+
                     {confirmDeleteId === inst.id ? (
                       <div className="w-full space-y-2 border-t border-[var(--border-subtle)] pt-2">
                         <p className="text-xs font-semibold text-[var(--status-err-ink)]">
@@ -726,6 +739,8 @@ export const App: React.FC = () => {
         onClose={() => setModalOpen(false)}
         onCreated={() => void refresh(false)}
       />
+
+      <EditInstanceModal instance={editInstance} onClose={() => setEditInstance(null)} onSaved={() => void refresh(false)} />
 
       <PruneModal
         open={pruneModalOpen}
