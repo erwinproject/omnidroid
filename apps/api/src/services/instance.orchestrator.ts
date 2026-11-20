@@ -15,9 +15,11 @@ import {
   type InstanceRecord,
   type ProxyConfig,
   type PruneReport,
+  type RootStatusResponse,
   type SetInstanceProxyInput,
   type SnapshotRecord,
   type UpdateInstanceInput,
+  type UpdateRootConfigInput,
 } from '@droidforge/shared';
 import type { AppEnv } from '../config/env.js';
 import type { StateStore } from '../db/database.js';
@@ -27,6 +29,7 @@ import type { AiSnapshotService } from './ai-snapshot.service.js';
 import type { ProxyRelayService } from './proxy-relay.service.js';
 import type { PruneService } from './prune.service.js';
 import type { RecordingService } from './recording.service.js';
+import type { RootService } from './root.service.js';
 import type { StealthService } from './stealth.service.js';
 import type { StreamService } from './stream.service.js';
 
@@ -42,6 +45,7 @@ export class InstanceOrchestrator {
     private readonly pruneService: PruneService,
     private readonly stream: StreamService,
     private readonly aiSnapshot: AiSnapshotService,
+    private readonly root: RootService,
   ) {}
 
   private resolveProfile(input: CreateInstanceInput): DeviceProfile {
@@ -154,6 +158,13 @@ export class InstanceOrchestrator {
       cpus: input.cpus,
       stealthMode: input.stealthMode,
       enablePlayStore,
+      enableRoot: Boolean(input.enableRoot),
+      rootConfig: {
+        enabled: Boolean(input.enableRoot),
+        mode: 'allow_all',
+        adbRoot: true,
+        allowedPackages: [],
+      },
       bootConfigDirty: false,
       proxy: resolvedProxy.proxy,
       proxyConfig: resolvedProxy.proxyConfig,
@@ -207,6 +218,7 @@ export class InstanceOrchestrator {
       await this.stealth.applyPostBootHardening(instance).catch(() => undefined);
     }
     const latest = this.store.getInstance(instance.id) ?? instance;
+    await this.root.apply(latest).catch(() => undefined);
     if (latest.proxyConfig) {
       await this.proxyRelay.applyToAndroid(this.adb, latest, latest.proxyConfig).catch(() => undefined);
     }
@@ -239,7 +251,19 @@ export class InstanceOrchestrator {
   async restoreActiveRelays(): Promise<void> {
     const list = this.store.listInstances();
     for (const inst of list) {
-      if ((inst.status === 'running' || inst.status === 'booting') && inst.proxyConfig) {
+      if (inst.status !== 'running' && inst.status !== 'booting') continue;
+      const stats = await this.docker.getContainerStats(inst.containerId).catch(() => ({
+        running: false,
+        cpuPercent: null,
+        memoryUsageMb: null,
+        memoryLimitMb: null,
+      }));
+      if (stats.running) {
+        await this.ensureAdbAuthorized(inst).catch(() => false);
+        await this.adb.connect(inst.adbTarget).catch(() => false);
+        await this.root.apply(inst).catch(() => undefined);
+      }
+      if (inst.proxyConfig) {
         try {
           await this.proxyRelay.ensureRelay(inst.id, inst.proxyConfig);
         } catch {
@@ -384,11 +408,21 @@ export class InstanceOrchestrator {
     let next: InstanceRecord = { ...current };
     let needsRecreate = false;
     let displayChanged = false;
+    let rootChanged = false;
 
     if (patch.name !== undefined && patch.name !== current.name) {
       const clash = this.store.getInstanceByName(patch.name);
       if (clash && clash.id !== id) throw new Error(`Instance with name "${patch.name}" already exists`);
       next.name = patch.name;
+    }
+
+    if (patch.enableRoot !== undefined && patch.enableRoot !== current.enableRoot) {
+      next.enableRoot = patch.enableRoot;
+      next.rootConfig = {
+        ...current.rootConfig,
+        enabled: patch.enableRoot,
+      };
+      rootChanged = true;
     }
 
     // ---- Boot-time fields (container recreate) ----
@@ -495,8 +529,50 @@ export class InstanceOrchestrator {
       await this.adb.shell(next.adbTarget, `wm density ${next.dpi}`).catch(() => undefined);
       this.stream.stopInstance(id); // viewers reconnect with the new resolution
     }
+    if (rootChanged && wasActive) {
+      await this.root.apply(next);
+    }
 
     return this.requireInstance(id);
+  }
+
+  async getRootStatus(id: string): Promise<RootStatusResponse> {
+    const inst = this.requireInstance(id);
+    return this.root.getStatus(inst);
+  }
+
+  async updateRootConfig(id: string, patch: UpdateRootConfigInput): Promise<RootStatusResponse> {
+    const current = this.requireInstance(id);
+    const nextConfig = {
+      enabled: patch.enabled ?? current.rootConfig.enabled,
+      mode: patch.mode ?? current.rootConfig.mode,
+      adbRoot: patch.adbRoot ?? current.rootConfig.adbRoot,
+      allowedPackages: patch.allowedPackages ?? current.rootConfig.allowedPackages,
+    };
+    const next: InstanceRecord = {
+      ...current,
+      enableRoot: nextConfig.enabled,
+      rootConfig: nextConfig,
+      updatedAt: new Date().toISOString(),
+    };
+    this.store.saveInstance(next);
+    await this.root.apply(next);
+    return this.root.getStatus(next);
+  }
+
+  async grantRootApp(id: string, packageName: string): Promise<RootStatusResponse> {
+    const current = this.requireInstance(id);
+    const pkg = packageName.trim();
+    const list = current.rootConfig.allowedPackages.includes(pkg)
+      ? current.rootConfig.allowedPackages
+      : [...current.rootConfig.allowedPackages, pkg];
+    return this.updateRootConfig(id, { allowedPackages: list });
+  }
+
+  async revokeRootApp(id: string, packageName: string): Promise<RootStatusResponse> {
+    const current = this.requireInstance(id);
+    const list = current.rootConfig.allowedPackages.filter((p) => p !== packageName);
+    return this.updateRootConfig(id, { allowedPackages: list });
   }
   private removeSnapshotFilesForInstance(instanceId: string): {
     removedFiles: number;

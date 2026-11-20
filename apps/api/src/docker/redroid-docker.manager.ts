@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { PassThrough, Readable } from 'node:stream';
 import Docker from 'dockerode';
 import type { DeviceProfile, InstanceRecord, SystemImageStatus } from '@droidforge/shared';
 import type { AppEnv } from '../config/env.js';
@@ -55,6 +56,34 @@ function isDockerNotFound(err: unknown): boolean {
   const e = err as { statusCode?: number; message?: string };
   if (e?.statusCode === 404) return true;
   return typeof e?.message === 'string' && /no such/i.test(e.message);
+}
+
+/** Builds an in-memory POSIX USTAR tar archive containing a single regular file. */
+export function buildSingleFileTar(fileName: string, content: Buffer, mode = 0o755): Buffer {
+  const nameBytes = Buffer.from(fileName, 'utf8');
+  if (nameBytes.length === 0 || nameBytes.length > 99) {
+    throw new Error(`Invalid tar file name: ${fileName}`);
+  }
+  const header = Buffer.alloc(512, 0);
+  nameBytes.copy(header, 0);
+  header.write(`${mode.toString(8).padStart(7, '0')}\0`, 100, 'ascii');
+  header.write('0000000\0', 108, 'ascii');
+  header.write('0000000\0', 116, 'ascii');
+  header.write(`${content.length.toString(8).padStart(11, '0')}\0`, 124, 'ascii');
+  header.write(`${Math.floor(Date.now() / 1000).toString(8).padStart(11, '0')}\0`, 136, 'ascii');
+  header.fill(0x20, 148, 156);
+  header.write('0', 156, 'ascii');
+  header.write('ustar\0', 257, 'ascii');
+  header.write('00', 263, 'ascii');
+
+  let checksum = 0;
+  for (let i = 0; i < 512; i++) checksum += header[i]!;
+  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 'ascii');
+
+  const paddedLen = Math.ceil(content.length / 512) * 512;
+  const dataBlock = paddedLen > 0 ? Buffer.alloc(paddedLen, 0) : Buffer.alloc(0);
+  if (content.length > 0) content.copy(dataBlock, 0);
+  return Buffer.concat([header, dataBlock, Buffer.alloc(1024, 0)]);
 }
 
 export function buildRedroidBootArgs(instance: {
@@ -375,6 +404,70 @@ export class RedroidDockerManager {
     } catch {
       return false;
     }
+  }
+
+  async putFileToContainer(
+    containerId: string,
+    destDir: string,
+    fileName: string,
+    content: Buffer,
+    mode = 0o755,
+  ): Promise<void> {
+    const tar = buildSingleFileTar(fileName, content, mode);
+    const stream = Readable.from([tar]);
+    await this.docker.getContainer(containerId).putArchive(stream, { path: destDir });
+  }
+
+  async execInContainer(
+    containerId: string,
+    cmd: string[],
+    options?: { timeoutMs?: number; detach?: boolean },
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const container = this.docker.getContainer(containerId);
+    const detach = Boolean(options?.detach);
+    const exec = await container.exec({
+      Cmd: cmd,
+      AttachStdout: !detach,
+      AttachStderr: !detach,
+      User: '0',
+    });
+
+    if (detach) {
+      await exec.start({ Detach: true, Tty: false });
+      return { exitCode: 0, stdout: '', stderr: '' };
+    }
+
+    const stream = await exec.start({ Detach: false, Tty: false });
+    const stdoutPass = new PassThrough();
+    const stderrPass = new PassThrough();
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    stdoutPass.on('data', (chunk: Buffer) => outChunks.push(chunk));
+    stderrPass.on('data', (chunk: Buffer) => errChunks.push(chunk));
+    this.docker.modem.demuxStream(stream, stdoutPass, stderrPass);
+
+    const timeoutMs = options?.timeoutMs ?? 15000;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        stream.destroy();
+        reject(new Error(`Container exec timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      stream.on('end', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      stream.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+
+    const info = await exec.inspect().catch(() => ({ ExitCode: 0 }));
+    return {
+      exitCode: typeof info.ExitCode === 'number' ? info.ExitCode : 0,
+      stdout: Buffer.concat(outChunks).toString('utf8'),
+      stderr: Buffer.concat(errChunks).toString('utf8'),
+    };
   }
 
   async removeContainer(

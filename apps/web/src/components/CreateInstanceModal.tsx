@@ -27,6 +27,7 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
   const [profileId, setProfileId] = useState('pixel-8-pro');
   const [stealthMode, setStealthMode] = useState(true);
   const [enablePlayStore, setEnablePlayStore] = useState(false);
+  const [enableRoot, setEnableRoot] = useState(false);
   const [playStoreTouched, setPlayStoreTouched] = useState(false);
   const [exposeAdbPort, setExposeAdbPort] = useState(false);
   const [memoryMb, setMemoryMb] = useState(2048);
@@ -170,6 +171,7 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
         profileId,
         stealthMode,
         enablePlayStore,
+        enableRoot,
         exposeAdbPort,
         memoryMb,
         cpus,
@@ -494,6 +496,15 @@ export const CreateInstanceModal: React.FC<Props> = ({ open, onClose, onCreated 
                     className="h-4 w-4 shrink-0 accent-[var(--ink)]"
                   />
                   <span>Expose Host ADB Port (15555-19999)</span>
+                </label>
+                <label className="flex min-h-[44px] cursor-pointer items-center gap-2.5 border-2 border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2 text-[13px] font-semibold text-[var(--ink)] sm:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={enableRoot}
+                    onChange={(e) => setEnableRoot(e.target.checked)}
+                    className="h-4 w-4 shrink-0 accent-[var(--ink)]"
+                  />
+                  <span>Enable Root Access (su Daemon)</span>
                 </label>
               </div>
 

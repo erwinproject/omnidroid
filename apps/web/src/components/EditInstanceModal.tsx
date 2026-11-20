@@ -26,6 +26,7 @@ export const EditInstanceModal: React.FC<Props> = ({ instance, onClose, onSaved 
   const [fps, setFps] = useState(30);
   const [gpuMode, setGpuMode] = useState<'guest' | 'host' | 'auto'>('guest');
   const [stealthMode, setStealthMode] = useState(true);
+  const [enableRoot, setEnableRoot] = useState(false);
   const [exposeAdbPort, setExposeAdbPort] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +47,7 @@ export const EditInstanceModal: React.FC<Props> = ({ instance, onClose, onSaved 
     setFps(instance.fps);
     setGpuMode(instance.gpuMode);
     setStealthMode(instance.stealthMode);
+    setEnableRoot(Boolean(instance.enableRoot));
     setExposeAdbPort(Boolean(instance.hostAdbPort));
     setError(null);
     createClient()
@@ -88,6 +90,7 @@ export const EditInstanceModal: React.FC<Props> = ({ instance, onClose, onSaved 
     if (fps !== cur.fps) patch.fps = fps;
     if (gpuMode !== cur.gpuMode) patch.gpuMode = gpuMode;
     if (stealthMode !== cur.stealthMode) patch.stealthMode = stealthMode;
+    if (enableRoot !== Boolean(cur.enableRoot)) patch.enableRoot = enableRoot;
     if (exposeAdbPort !== Boolean(cur.hostAdbPort)) patch.exposeAdbPort = exposeAdbPort;
     const profileChanged = profileId !== cur.profile.id;
     const override: Record<string, string> = {};
@@ -208,6 +211,10 @@ export const EditInstanceModal: React.FC<Props> = ({ instance, onClose, onSaved 
                 <input id="edit-dpi" type="number" min={120} max={640} value={dpi} onChange={num(setDpi)} className="nb-input num" />
               </div>
             </div>
+            <label className="flex min-h-[44px] cursor-pointer items-center gap-2.5 border-2 border-[var(--border)] bg-[var(--bg-surface)] px-3 py-2 text-[13px] font-semibold text-[var(--ink)]">
+              <input type="checkbox" checked={enableRoot} onChange={(e) => setEnableRoot(e.target.checked)} />
+              Enable Root Access (su Daemon)
+            </label>
           </fieldset>
 
           <fieldset className="space-y-3">

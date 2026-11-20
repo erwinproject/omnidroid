@@ -28,6 +28,7 @@ import { InstanceOrchestrator } from './services/instance.orchestrator.js';
 import { ProxyRelayService } from './services/proxy-relay.service.js';
 import { PruneService } from './services/prune.service.js';
 import { RecordingService } from './services/recording.service.js';
+import { RootService } from './services/root.service.js';
 import { StealthService } from './services/stealth.service.js';
 import { StreamService } from './services/stream.service.js';
 import { UiAutomationService } from './services/ui-automation.service.js';
@@ -53,6 +54,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
   const proxyRelay = new ProxyRelayService(env);
   const recordings = new RecordingService(env);
   const prune = new PruneService(env, store, docker, recordings);
+  const root = new RootService(env, docker);
   const input = new InputService(adb);
   const ui = new UiAutomationService(adb, input);
   const aiSnapshot = new AiSnapshotService(adb, ui);
@@ -70,6 +72,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
     prune,
     stream,
     aiSnapshot,
+    root,
   );
 
   const ctx: AppContext = {
@@ -81,6 +84,7 @@ export async function buildApp(options: BuildAppOptions = {}): Promise<{
     proxyRelay,
     recordings,
     prune,
+    root,
     input,
     ui,
     aiSnapshot,

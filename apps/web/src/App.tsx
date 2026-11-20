@@ -373,6 +373,11 @@ export const App: React.FC = () => {
                           Play Store
                         </span>
                       )}
+                      {inst.enableRoot && (
+                        <span className="inline-flex items-center gap-1 border border-[var(--border)] bg-[var(--status-warn-bg)] px-1.5 py-0.5 text-xs font-bold text-[var(--status-warn-ink)]">
+                          Root
+                        </span>
+                      )}
                       {(inst.proxyConfig || inst.proxy) && (
                         <span className="inline-flex items-center gap-1 border border-[var(--border)] bg-[var(--bg-subtle)] px-1.5 py-0.5 text-xs font-bold uppercase text-[var(--ink)]">
                           <Globe className="h-3 w-3" aria-hidden="true" />

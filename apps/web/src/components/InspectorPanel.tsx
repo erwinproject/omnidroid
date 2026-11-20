@@ -20,6 +20,7 @@ import { buildWsUrl, createClient, getApiKey } from '../api/client';
 import { ProxyPanel } from './ProxyPanel';
 import { ApkInstaller } from './ApkInstaller';
 import { FileManagerPanel } from './FileManagerPanel';
+import { RootPanel } from './RootPanel';
 
 interface Props {
   instance: InstanceRecord;
@@ -60,6 +61,7 @@ export const InspectorPanel: React.FC<Props> = ({
   const [shellOut, setShellOut] = useState('');
   const [shellRunning, setShellRunning] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
+  const [shellAsRoot, setShellAsRoot] = useState(false);
 
   const [logs, setLogs] = useState<string[]>([]);
   const [logLevel, setLogLevel] = useState('I');
@@ -193,13 +195,21 @@ export const InspectorPanel: React.FC<Props> = ({
     }
   }
 
+  useEffect(() => {
+    if (!instance.enableRoot) setShellAsRoot(false);
+  }, [instance.enableRoot]);
+
   async function runShell(e?: React.FormEvent) {
     if (e) e.preventDefault();
     if (!shellCmd.trim()) return;
     setShellRunning(true);
     setShellError(null);
     try {
-      const res = await createClient().device.shell(instance.id, { command: shellCmd, timeoutMs: 10000 });
+      const res = await createClient().device.shell(instance.id, {
+        command: shellCmd,
+        timeoutMs: 10000,
+        asRoot: shellAsRoot && instance.enableRoot,
+      });
       setShellOut(res.stdout || res.stderr || `(exit ${res.exitCode})`);
     } catch (err) {
       setShellError(err instanceof Error ? err.message : String(err));
@@ -244,7 +254,7 @@ export const InspectorPanel: React.FC<Props> = ({
     { id: 'apps', label: 'Apps', title: 'Apps & APK', icon: <Package className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'files', label: 'Files', title: 'File Sharing', icon: <FolderOpen className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'proxy', label: 'Proxy', title: 'Proxy & Network', icon: <Globe className="h-3.5 w-3.5" aria-hidden="true" /> },
-    { id: 'stealth', label: 'Stealth', title: 'Stealth & ADB', icon: <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> },
+    { id: 'stealth', label: 'Stealth', title: 'Root, Stealth & Shell', icon: <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'logcat', label: 'Logs', title: 'Logcat Stream', icon: <Terminal className="h-3.5 w-3.5" aria-hidden="true" /> },
     { id: 'api', label: 'API', title: 'REST & WebSocket API', icon: <Code2 className="h-3.5 w-3.5" aria-hidden="true" /> },
   ];
@@ -582,6 +592,8 @@ export const InspectorPanel: React.FC<Props> = ({
 
         {tab === 'stealth' && (
           <div className="space-y-4">
+            <RootPanel instance={instance} onRootChanged={onInstanceRefresh} />
+
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h3 className="text-sm font-extrabold text-[var(--ink)]">Anti-Emulator Stealth Audit</h3>
@@ -658,16 +670,33 @@ export const InspectorPanel: React.FC<Props> = ({
             )}
 
             <div className="space-y-2.5 border-t-2 border-[var(--border)] pt-3">
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5 text-sm font-extrabold text-[var(--ink)]">
                   <Cpu className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span>Quick ADB Shell</span>
+                  <span>{shellAsRoot && instance.enableRoot ? 'Root Shell (# uid=0)' : 'Quick ADB Shell ($)'}</span>
                 </div>
-                {shellOut && (
-                  <button type="button" onClick={() => setShellOut('')} className="nb-btn nb-btn-secondary px-2.5">
-                    Clear
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  <label
+                    className={`flex cursor-pointer items-center gap-1.5 border-2 border-[var(--border)] bg-[var(--bg-ground)] px-2 py-1 text-xs font-bold ${
+                      instance.enableRoot ? 'text-[var(--ink)]' : 'opacity-50'
+                    }`}
+                    title={instance.enableRoot ? 'Execute command directly as uid=0' : 'Enable Root above first'}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={shellAsRoot && instance.enableRoot}
+                      disabled={!instance.enableRoot}
+                      onChange={(e) => setShellAsRoot(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-[var(--ink)]"
+                    />
+                    <span>Run as Root (uid=0)</span>
+                  </label>
+                  {shellOut && (
+                    <button type="button" onClick={() => setShellOut('')} className="nb-btn nb-btn-secondary px-2.5">
+                      Clear
+                    </button>
+                  )}
+                </div>
               </div>
 
               <form onSubmit={(e) => void runShell(e)} className="flex gap-2">

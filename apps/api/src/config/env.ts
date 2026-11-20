@@ -24,6 +24,7 @@ const EnvSchema = z.object({
   PROXY_RELAY_PORT_MAX: z.coerce.number().int().min(10002).max(65535).default(24999),
   DATA_DIR: z.string().default('./data'),
   ADB_BIN: z.string().default('adb'),
+  DF_SU_BIN_PATH: z.string().default('/opt/droidforge/df-su'),
   SCRCPY_SERVER_PATH: z.string().default('/opt/scrcpy/scrcpy-server.jar'),
   SCRCPY_VERSION: z.string().default('3.1'),
   STREAM_BITRATE: z.coerce.number().int().min(500000).max(40000000).default(4000000),

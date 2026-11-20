@@ -1,3 +1,13 @@
+FROM debian:bookworm-slim AS su-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends gcc musl-tools binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/su/df-su.c /src/df-su.c
+RUN mkdir -p /out \
+    && musl-gcc -static -O2 -Wall -Wextra -o /out/df-su /src/df-su.c \
+    && strip /out/df-su
+
 FROM node:24-bookworm-slim AS builder
 
 WORKDIR /app
@@ -41,11 +51,13 @@ RUN npm install --omit=dev
 
 COPY --from=builder /app/packages/shared/dist packages/shared/dist
 COPY --from=builder /app/apps/api/dist apps/api/dist
+COPY --from=su-builder /out/df-su /opt/droidforge/df-su
 
 ENV NODE_ENV=production
 ENV API_PORT=13000
 ENV DATA_DIR=/data
 ENV HOME=/data
+ENV DF_SU_BIN_PATH=/opt/droidforge/df-su
 
 EXPOSE 13000
 

@@ -23,6 +23,13 @@ function normalizeInstance(raw: InstanceRecord): InstanceRecord {
   return {
     ...raw,
     enablePlayStore: raw.enablePlayStore ?? false,
+    enableRoot: raw.enableRoot ?? raw.rootConfig?.enabled ?? false,
+    rootConfig: raw.rootConfig ?? {
+      enabled: raw.enableRoot ?? false,
+      mode: 'allow_all',
+      adbRoot: true,
+      allowedPackages: [],
+    },
     bootConfigDirty: raw.bootConfigDirty ?? false,
     proxyProfileId: raw.proxyProfileId ?? null,
     proxyConfig,

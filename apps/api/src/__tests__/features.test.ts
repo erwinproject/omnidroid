@@ -14,6 +14,7 @@ import { normalizeDevicePath, parseLsOutput, shQuote } from '../routes/files.rou
 import type { AdbExecutor } from '../services/adb.service.js';
 import { detectPackageKind, installPackageFile } from '../services/apk-install.service.js';
 import { FRAME_CONFIG, FRAME_DELTA, FRAME_KEY, H264StreamService } from '../services/h264-stream.service.js';
+import { buildRootPolicyFile, parsePackagesList, parseSuAuditLog } from '../services/root.service.js';
 import type { StreamSocket } from '../services/stream.service.js';
 
 function mockDocker(): RedroidDockerManager {
@@ -26,6 +27,8 @@ function mockDocker(): RedroidDockerManager {
     stopContainer: vi.fn().mockResolvedValue(undefined),
     restartContainer: vi.fn().mockResolvedValue(undefined),
     authorizeAdbKey: vi.fn().mockResolvedValue(false),
+    putFileToContainer: vi.fn().mockResolvedValue(undefined),
+    execInContainer: vi.fn().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' }),
     removeContainer: vi.fn().mockResolvedValue(undefined),
     updateResources: vi.fn().mockResolvedValue(undefined),
     getContainerStats: vi.fn().mockResolvedValue({ running: true, cpuPercent: 1, memoryUsageMb: 1, memoryLimitMb: 2 }),
@@ -303,5 +306,178 @@ describe('H.264 stream (scrcpy protocol)', () => {
     await expect(svc.subscribe({ id: 'x', adbTarget: 't', width: 1, height: 1, fps: 30 } as InstanceRecord, ws)).rejects.toThrow(
       /scrcpy-server not found/,
     );
+  });
+});
+
+describe('Root access policy, API & live toggle', () => {
+  it('parses packages.list, builds root policy files, and parses audit logs', () => {
+    const { pkgToUid, uidToPkg } = parsePackagesList(
+      [
+        'com.example.alpha 10123 0 /data/user/0/com.example.alpha default:targetSdkVersion=33 none 0 0 1',
+        'com.example.beta 10124 0 /data/user/0/com.example.beta default:targetSdkVersion=33 none 0 0 1',
+      ].join('\n'),
+    );
+    expect(pkgToUid.get('com.example.alpha')).toBe(10123);
+    expect(uidToPkg.get(10124)).toBe('com.example.beta');
+
+    expect(buildRootPolicyFile({ enabled: false, mode: 'allow_all', adbRoot: true, allowedPackages: [] }, pkgToUid)).toBe(
+      'mode=disabled\nadb_root=1\n',
+    );
+    expect(buildRootPolicyFile({ enabled: true, mode: 'allow_all', adbRoot: false, allowedPackages: [] }, pkgToUid)).toBe(
+      'mode=allow_all\nadb_root=0\n',
+    );
+    expect(
+      buildRootPolicyFile(
+        {
+          enabled: true,
+          mode: 'allowlist',
+          adbRoot: true,
+          allowedPackages: ['com.example.alpha', 'com.missing.app', 'com.example.alpha'],
+        },
+        pkgToUid,
+      ),
+    ).toBe('mode=allowlist\nadb_root=1\nuid=10123\n');
+
+    const logs = parseSuAuditLog(
+      [
+        '1700000001 10123 412 DENY id',
+        '1700000002 2000 500 ALLOW -c whoami',
+        '1700000003 10999 611 DENY sh',
+      ].join('\n'),
+      uidToPkg,
+    );
+    expect(logs).toHaveLength(3);
+    expect(logs[0]).toMatchObject({ uid: 10999, packageName: null, allowed: false, command: 'sh' });
+    expect(logs[1]).toMatchObject({ uid: 2000, packageName: 'com.android.shell', allowed: true });
+    expect(logs[2]).toMatchObject({ uid: 10123, packageName: 'com.example.alpha', allowed: false, command: 'id' });
+  });
+
+  it('toggles root live without recreating, manages allowlist apps, and runs Root Shell', async () => {
+    const fakeBin = path.join(os.tmpdir(), `df-su-test-${process.pid}`);
+    fs.writeFileSync(fakeBin, '#!/bin/sh\necho ok\n');
+
+    const docker = mockDocker();
+    let rootOn = false;
+    (docker.execInContainer as ReturnType<typeof vi.fn>).mockImplementation(async (_cid: string, cmd: string[]) => {
+      const joined = cmd.join(' ');
+      if (joined.includes('===DAEMON===')) {
+        return {
+          exitCode: 0,
+          stdout: [
+            '===DAEMON===',
+            rootOn ? 'RUNNING' : 'STOPPED',
+            '===SU_BIN===',
+            rootOn ? 'PRESENT' : 'ABSENT',
+            '===PKGS===',
+            'com.example.app 10150 0 /data/user/0/com.example.app default none 0 0 1',
+            '===LOG===',
+            '1700000010 10150 999 DENY id',
+          ].join('\n'),
+          stderr: '',
+        };
+      }
+      if (joined.includes('cp /data/adb/droidforge/df-su /system/bin/su')) {
+        rootOn = true;
+      }
+      if (joined.includes('rm -f /system/bin/su /system/xbin/su')) {
+        rootOn = false;
+      }
+      if (joined === 'sh -c id') {
+        return { exitCode: 0, stdout: 'uid=0(root) gid=0(root)\n', stderr: '' };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    });
+
+    const env = loadEnv({ NODE_ENV: 'test', REQUIRE_AUTH: 'false', DF_SU_BIN_PATH: fakeBin });
+    const { app, ctx } = await buildApp({ env, docker, adb: mockAdb() });
+    try {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/instances',
+        payload: { name: 'root-test', autoStart: false, enableRoot: false },
+      });
+      expect(created.statusCode).toBe(201);
+      const inst = created.json() as InstanceRecord;
+      expect(inst.enableRoot).toBe(false);
+      expect(docker.createContainer).toHaveBeenCalledTimes(1);
+
+      // Simulate running container state without launching background boot timer
+      ctx.store.updateInstanceStatus(inst.id, 'running');
+
+      // Root shell fails with 403 while Root is disabled
+      const deniedShell = await app.inject({
+        method: 'POST',
+        url: `/api/v1/instances/${inst.id}/device/shell`,
+        payload: { command: 'id', asRoot: true },
+      });
+      expect(deniedShell.statusCode).toBe(403);
+
+      // Toggle Root ON via PATCH without recreating container
+      const patched = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/instances/${inst.id}`,
+        payload: { enableRoot: true },
+      });
+      expect(patched.statusCode).toBe(200);
+      expect(patched.json()).toMatchObject({ enableRoot: true });
+      expect(docker.createContainer).toHaveBeenCalledTimes(1);
+
+      // Explicitly apply PUT /device/root and inspect status
+      const enabled = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/instances/${inst.id}/device/root`,
+        payload: { enabled: true, mode: 'allowlist', adbRoot: true },
+      });
+      expect(enabled.statusCode).toBe(200);
+      expect(enabled.json()).toMatchObject({
+        enabled: true,
+        mode: 'allowlist',
+        adbRoot: true,
+        daemonRunning: true,
+        suBinaryPresent: true,
+      });
+      expect(docker.putFileToContainer).toHaveBeenCalled();
+
+      // Grant & revoke app in allowlist
+      const granted = await app.inject({
+        method: 'POST',
+        url: `/api/v1/instances/${inst.id}/device/root/apps`,
+        payload: { packageName: 'com.example.app' },
+      });
+      expect(granted.statusCode).toBe(200);
+      expect(granted.json().allowedPackages).toEqual(['com.example.app']);
+
+      const status = await app.inject({ method: 'GET', url: `/api/v1/instances/${inst.id}/device/root` });
+      expect(status.statusCode).toBe(200);
+      expect(status.json().recentLogs[0]).toMatchObject({ packageName: 'com.example.app', allowed: false });
+
+      const revoked = await app.inject({
+        method: 'DELETE',
+        url: `/api/v1/instances/${inst.id}/device/root/apps/com.example.app`,
+      });
+      expect(revoked.statusCode).toBe(200);
+      expect(revoked.json().allowedPackages).toEqual([]);
+
+      // Root shell succeeds when root is enabled
+      const rootShell = await app.inject({
+        method: 'POST',
+        url: `/api/v1/instances/${inst.id}/device/shell`,
+        payload: { command: 'id', asRoot: true },
+      });
+      expect(rootShell.statusCode).toBe(200);
+      expect(rootShell.json().stdout).toContain('uid=0(root)');
+
+      // Disable Root
+      const disabled = await app.inject({
+        method: 'PUT',
+        url: `/api/v1/instances/${inst.id}/device/root`,
+        payload: { enabled: false },
+      });
+      expect(disabled.statusCode).toBe(200);
+      expect(disabled.json()).toMatchObject({ enabled: false, daemonRunning: false, suBinaryPresent: false });
+    } finally {
+      await app.close();
+      fs.rmSync(fakeBin, { force: true });
+    }
   });
 });

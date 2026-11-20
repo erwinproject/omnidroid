@@ -2,10 +2,12 @@ import type { FastifyInstance } from 'fastify';
 import {
   BatteryInputSchema,
   ClipboardInputSchema,
+  GrantRootAppInputSchema,
   LocationInputSchema,
   NetworkInputSchema,
   RotationInputSchema,
   ShellCommandInputSchema,
+  UpdateRootConfigSchema,
 } from '@droidforge/shared';
 import type { AppContext } from '../context.js';
 import { parseGetProp } from '../services/stealth.service.js';
@@ -42,11 +44,36 @@ export function registerDeviceRoutes(app: FastifyInstance, ctx: AppContext): voi
     };
   });
 
-  app.post('/api/v1/instances/:id/device/shell', { schema: { tags: ['Device'], summary: 'Execute an ADB shell command with timeout' } }, async (req) => {
+  app.post('/api/v1/instances/:id/device/shell', { schema: { tags: ['Device'], summary: 'Execute an ADB or Root (uid=0) shell command with timeout' } }, async (req) => {
     const { id } = req.params as { id: string };
     const inst = ctx.orchestrator.requireInstance(id);
     const input = ShellCommandInputSchema.parse(req.body);
+    if (input.asRoot) {
+      return ctx.root.runRootShell(inst, input.command, input.timeoutMs);
+    }
     return ctx.adb.shell(inst.adbTarget, input.command, input.timeoutMs);
+  });
+
+  app.get('/api/v1/instances/:id/device/root', { schema: { tags: ['Device'], summary: 'Get live root access configuration, daemon state, and recent su audit logs' } }, async (req) => {
+    const { id } = req.params as { id: string };
+    return ctx.orchestrator.getRootStatus(id);
+  });
+
+  app.put('/api/v1/instances/:id/device/root', { schema: { tags: ['Device'], summary: 'Update root access toggle, mode (allow_all / allowlist), adbRoot, or allowed packages' } }, async (req) => {
+    const { id } = req.params as { id: string };
+    const patch = UpdateRootConfigSchema.parse(req.body ?? {});
+    return ctx.orchestrator.updateRootConfig(id, patch);
+  });
+
+  app.post('/api/v1/instances/:id/device/root/apps', { schema: { tags: ['Device'], summary: 'Grant root access to an Android package in allowlist mode' } }, async (req) => {
+    const { id } = req.params as { id: string };
+    const input = GrantRootAppInputSchema.parse(req.body);
+    return ctx.orchestrator.grantRootApp(id, input.packageName);
+  });
+
+  app.delete('/api/v1/instances/:id/device/root/apps/:packageName', { schema: { tags: ['Device'], summary: 'Revoke root access for an Android package' } }, async (req) => {
+    const { id, packageName } = req.params as { id: string; packageName: string };
+    return ctx.orchestrator.revokeRootApp(id, decodeURIComponent(packageName));
   });
 
   app.get('/api/v1/instances/:id/device/clipboard', { schema: { tags: ['Device'], summary: 'Read Android clipboard content' } }, async (req) => {

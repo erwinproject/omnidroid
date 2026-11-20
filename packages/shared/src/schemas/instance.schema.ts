@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { RootConfigSchema } from './device.schema.js';
 import { DeviceProfileOverrideSchema, DeviceProfileSchema } from './profile.schema.js';
 import { ProxyConfigSchema } from './proxy.schema.js';
 
@@ -28,6 +29,7 @@ export const CreateInstanceSchema = z.object({
   cpus: z.number().min(1).max(16).default(2),
   exposeAdbPort: z.boolean().default(false),
   enablePlayStore: z.boolean().default(false),
+  enableRoot: z.boolean().default(false),
   proxy: z.string().optional(),
   proxyConfig: ProxyConfigSchema.nullable().optional(),
   proxyProfileId: z.string().nullable().optional(),
@@ -51,6 +53,7 @@ export const UpdateInstanceSchema = z
     memoryMb: z.number().int().min(1024).max(32768),
     cpus: z.number().min(1).max(16),
     exposeAdbPort: z.boolean(),
+    enableRoot: z.boolean(),
     customProps: z.record(z.string()),
   })
   .partial();
@@ -75,6 +78,13 @@ export const InstanceRecordSchema = z.object({
   cpus: z.number(),
   stealthMode: z.boolean(),
   enablePlayStore: z.boolean().default(false),
+  enableRoot: z.boolean().default(false),
+  rootConfig: RootConfigSchema.default({
+    enabled: false,
+    mode: 'allow_all',
+    adbRoot: true,
+    allowedPackages: [],
+  }),
   /** True when width/height/dpi were changed live; the next start recreates the container. */
   bootConfigDirty: z.boolean().default(false),
   proxy: z.string().nullable(),

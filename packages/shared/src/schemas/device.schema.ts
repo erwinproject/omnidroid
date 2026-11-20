@@ -12,6 +12,42 @@ export const AppPermissionsInputSchema = z.object({
 export const ShellCommandInputSchema = z.object({
   command: z.string().min(1).max(4000),
   timeoutMs: z.number().int().min(500).max(60000).default(15000),
+  asRoot: z.boolean().default(false),
+});
+
+export const RootModeSchema = z.enum(['allow_all', 'allowlist']);
+
+export const RootConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  mode: RootModeSchema.default('allow_all'),
+  adbRoot: z.boolean().default(true),
+  allowedPackages: z.array(z.string().min(1).max(200)).default([]),
+});
+
+export const UpdateRootConfigSchema = RootConfigSchema.partial();
+
+export const GrantRootAppInputSchema = z.object({
+  packageName: z.string().min(1).max(200),
+});
+
+export const RootAuditEntrySchema = z.object({
+  timestamp: z.string(),
+  uid: z.number().int().nonnegative(),
+  packageName: z.string().nullable(),
+  pid: z.number().int(),
+  allowed: z.boolean(),
+  command: z.string(),
+});
+
+export const RootStatusResponseSchema = z.object({
+  instanceId: z.string(),
+  enabled: z.boolean(),
+  mode: RootModeSchema,
+  adbRoot: z.boolean(),
+  allowedPackages: z.array(z.string()),
+  daemonRunning: z.boolean(),
+  suBinaryPresent: z.boolean(),
+  recentLogs: z.array(RootAuditEntrySchema),
 });
 
 export const ClipboardInputSchema = z.object({
@@ -66,3 +102,9 @@ export type NetworkInput = z.infer<typeof NetworkInputSchema>;
 export type RotationInput = z.infer<typeof RotationInputSchema>;
 export type StealthCheckItem = z.infer<typeof StealthCheckItemSchema>;
 export type StealthCheckReport = z.infer<typeof StealthCheckReportSchema>;
+export type RootMode = z.infer<typeof RootModeSchema>;
+export type RootConfig = z.infer<typeof RootConfigSchema>;
+export type UpdateRootConfigInput = z.infer<typeof UpdateRootConfigSchema>;
+export type GrantRootAppInput = z.infer<typeof GrantRootAppInputSchema>;
+export type RootAuditEntry = z.infer<typeof RootAuditEntrySchema>;
+export type RootStatusResponse = z.infer<typeof RootStatusResponseSchema>;

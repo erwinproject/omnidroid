@@ -22,6 +22,7 @@ import type {
   PruneOptionsInput,
   PruneReport,
   RotationInput,
+  RootStatusResponse,
   SetInstanceProxyInput,
   ShellCommandInput,
   SnapshotRecord,
@@ -32,6 +33,7 @@ import type {
   TestProxyInput,
   TextInput,
   UpdateInstanceInput,
+  UpdateRootConfigInput,
   UiBatchActionsInput,
   UiClickInput,
   UiNode,
@@ -334,5 +336,22 @@ export class EmulatorApiClient {
       }),
     stealthCheck: (id: string) =>
       this.request<StealthCheckReport>(`/api/v1/instances/${id}/device/stealth-check`),
+    getRoot: (id: string) =>
+      this.request<RootStatusResponse>(`/api/v1/instances/${id}/device/root`),
+    setRoot: (id: string, input: UpdateRootConfigInput) =>
+      this.request<RootStatusResponse>(`/api/v1/instances/${id}/device/root`, {
+        method: 'PUT',
+        body: JSON.stringify(input),
+      }),
+    grantRootApp: (id: string, packageName: string) =>
+      this.request<RootStatusResponse>(`/api/v1/instances/${id}/device/root/apps`, {
+        method: 'POST',
+        body: JSON.stringify({ packageName }),
+      }),
+    revokeRootApp: (id: string, packageName: string) =>
+      this.request<RootStatusResponse>(
+        `/api/v1/instances/${id}/device/root/apps/${encodeURIComponent(packageName)}`,
+        { method: 'DELETE' },
+      ),
   };
 }

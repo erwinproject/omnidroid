@@ -39,6 +39,8 @@ function createMockDocker(): RedroidDockerManager {
     stopContainer: vi.fn().mockResolvedValue(undefined),
     restartContainer: vi.fn().mockResolvedValue(undefined),
     authorizeAdbKey: vi.fn().mockResolvedValue(false),
+    putFileToContainer: vi.fn().mockResolvedValue(undefined),
+    execInContainer: vi.fn().mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' }),
     removeContainer: vi.fn().mockResolvedValue(undefined),
     getContainerStats: vi.fn().mockResolvedValue({
       running: true,

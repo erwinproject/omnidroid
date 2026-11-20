@@ -142,6 +142,22 @@ export class StealthService {
         : 'x86_64-only ABI detected; use a Redroid image with libndk_translation for ARM64 apps.',
     });
 
+    // 10. Root su binary exposure
+    const suRes = await this.adb.shell(
+      target,
+      'test -x /system/bin/su -o -x /system/xbin/su && echo EXPOSED || echo CLEAN',
+    );
+    const suExposed = suRes.stdout.includes('EXPOSED');
+    checks.push({
+      key: 'root.su_binary',
+      category: 'emulator_markers',
+      status: suExposed ? 'warn' : 'pass',
+      actual: suExposed ? 'su present in /system/bin or /system/xbin' : 'clean (no su binary)',
+      detail: suExposed
+        ? 'Root su binary is exposed to apps; disable Root in the Root panel to hide it.'
+        : 'No su binary present in /system/bin or /system/xbin.',
+    });
+
     const passed = checks.filter((c) => c.status === 'pass').length;
     const warnings = checks.filter((c) => c.status === 'warn').length;
     const failed = checks.filter((c) => c.status === 'fail').length;

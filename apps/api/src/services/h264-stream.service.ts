@@ -192,6 +192,7 @@ export class H264StreamService {
       throw new Error(`scrcpy-server not found at ${this.env.SCRCPY_SERVER_PATH}`);
     }
 
+    await adb.connect(target).catch(() => false);
     await adb.shell(target, 'pkill -f com.genymobile.scrcpy.Server || true', 4000).catch(() => undefined);
     const pushed = await adb.pushFile(target, this.env.SCRCPY_SERVER_PATH, REMOTE_JAR);
     if (pushed.exitCode !== 0) throw new Error(pushed.stderr || 'Failed to push scrcpy-server');

@@ -9,6 +9,7 @@ import type { InstanceOrchestrator } from './services/instance.orchestrator.js';
 import type { ProxyRelayService } from './services/proxy-relay.service.js';
 import type { PruneService } from './services/prune.service.js';
 import type { RecordingService } from './services/recording.service.js';
+import type { RootService } from './services/root.service.js';
 import type { StealthService } from './services/stealth.service.js';
 import type { StreamService } from './services/stream.service.js';
 import type { UiAutomationService } from './services/ui-automation.service.js';
@@ -22,6 +23,7 @@ export interface AppContext {
   proxyRelay: ProxyRelayService;
   recordings: RecordingService;
   prune: PruneService;
+  root: RootService;
   input: InputService;
   ui: UiAutomationService;
   aiSnapshot: AiSnapshotService;
